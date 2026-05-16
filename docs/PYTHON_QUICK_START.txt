@@ -1,0 +1,325 @@
+================================================================================
+                    PYTHON MONOREPO - QUICK START
+                       Copy & Paste Ready Structure
+================================================================================
+
+STEP 1: Copy the folder structure
+================================================================================
+
+Open: python_monorepo_structure.md
+
+The entire folder tree is there. Copy it.
+
+Create the directory structure:
+
+```bash
+mkdir -p impact-analysis-system
+cd impact-analysis-system
+
+# Create all directories (or use the script below)
+```
+
+OR use this script:
+
+```bash
+#!/bin/bash
+
+dirs=(
+  "core/types"
+  "core/adapters/feedback"
+  "core/graph/queries"
+  "core/graph/migrations"
+  "core/rules"
+  "core/testselection"
+  "core/config"
+  "core/tests"
+  
+  "ingestion/adapters/datadog"
+  "ingestion/adapters/github"
+  "ingestion/adapters/testparser"
+  "ingestion/adapters/documentation"
+  "ingestion/adapters/openapi"
+  "ingestion/adapters/protobuf"
+  "ingestion/parsers"
+  "ingestion/tests"
+  
+  "api/handlers"
+  "api/models"
+  "api/config"
+  "api/tests"
+  
+  "webhook/providers/github"
+  "webhook/providers/gitlab"
+  "webhook/providers/gitea"
+  "webhook/detector"
+  "webhook/tests"
+  
+  "dashboard/public"
+  "dashboard/src/components"
+  "dashboard/src/pages"
+  "dashboard/src/api"
+  "dashboard/src/utils"
+  "dashboard/tests"
+  
+  "cli/commands"
+  "cli/tests"
+  
+  "observability/metrics"
+  "observability/alerts"
+  "observability/dashboards/grafana"
+  
+  "ci/github-actions"
+  "ci/templates/.github/workflows"
+  
+  "examples/custom_slack_adapter"
+  "examples/custom_kubernetes_adapter"
+  "examples/test_project/auth-service/tests"
+  "examples/test_project/auth-service/src"
+  "examples/test_project/payment-service"
+  "examples/test_project/order-service/tests"
+  
+  "tests/integration"
+  "tests/e2e"
+  "tests/fixtures"
+  
+  "scripts"
+  "config/env"
+  "docker"
+  "helm/templates"
+  "deployment"
+  "docs"
+)
+
+for dir in "${dirs[@]}"; do
+  mkdir -p "$dir"
+done
+
+echo "✅ All directories created"
+```
+
+STEP 2: Create root files
+================================================================================
+
+Create these in project root:
+
+- README.md
+- LICENSE
+- CONTRIBUTING.md
+- .gitignore
+- Makefile
+- docker-compose.yml
+- pyproject.toml
+- requirements.txt
+- requirements-dev.txt
+
+STEP 3: Create __init__.py files
+================================================================================
+
+For every Python package (directory with Python files), create __init__.py:
+
+```bash
+find . -type d -name "__pycache__" -prune -o -type d -exec \
+  [ -f {}/__init__.py ] || touch {}/__init__.py \;
+```
+
+STEP 4: Ask Claude Code to fill in files
+================================================================================
+
+For EACH file, use this prompt template:
+
+---
+
+Create: impact-analysis-system/core/types/service.py
+
+Context:
+  - Part of polyrepo impact analysis system
+  - Python 3.10+, Pydantic v2, type hints required
+  
+Purpose:
+  Define core data structures: Service, ExternalConnection, CodeArtifact, TestCase, Change
+
+Required classes:
+
+1. Service
+   Fields: id (str), name (str), repoUrl (str), language (str), framework (str), owner (str), createdAt (datetime), lastUpdatedAt (datetime), isActive (bool)
+   
+2. ExternalConnection
+   Fields: id (str), type (str), sourceServiceId (str), targetServiceId (str|None), targetName (str), protocol (str), endpoint (str), direction (str), frequency (float), criticality (str), contractStatus (str), dataFlow (dict), discoveredAt (datetime), lastObservedAt (datetime)
+   
+3. CodeArtifact
+   Fields: id (str), repoId (str), type (str), name (str), file (str), lineRange (dict), isPublic (bool), version (str|None), externalConnections (list[str])
+   
+4. TestCase
+   Fields: id (str), repoId (str), type (str), name (str), file (str), lineRange (dict), duration_ms (int), flakiness_score (float), priority (str), affectedRepos (list[str])
+   
+5. Change
+   Fields: id (str), repoId (str), type (str), timestamp (datetime), description (str), files (list[dict]), affectedArtifacts (list[str])
+
+Constraints:
+  - Use Pydantic v2 BaseModel
+  - All classes should be serializable to JSON
+  - Include docstrings
+  - Use type hints for all fields
+  - Make classes immutable (frozen=True)
+
+---
+
+STEP 5: Order of files to create
+================================================================================
+
+Create in this order (builds from foundation up):
+
+PHASE 1: Core data structures
+  1. core/types/service.py
+  2. core/types/change.py
+  3. core/types/errors.py
+
+PHASE 2: Core framework
+  4. core/adapters/base.py
+  5. core/adapters/registry.py
+  6. core/adapters/merger.py
+  7. core/adapters/mapper.py
+  8. core/adapters/validator.py
+  9. core/adapters/confidence_scorer.py
+
+PHASE 3: Graph database
+  10. core/graph/client.py
+  11. core/graph/schema.py
+  12. core/graph/loader.py
+  13. core/graph/queries/query_builder.py
+  14. core/graph/queries/direct_impact.py
+  15. core/graph/queries/transitive_impact.py
+  16. core/graph/queries/circular_deps.py
+
+PHASE 4: Impact analysis
+  17. core/rules/rule.py
+  18. core/rules/engine.py
+  19. core/rules/direct_impact.py
+  20. core/rules/transitive_impact.py
+
+PHASE 5: Test selection
+  21. core/testselection/classifier.py
+  22. core/testselection/selector.py
+  23. core/testselection/pyramid.py
+
+PHASE 6: Configuration
+  24. core/config/settings.py
+
+PHASE 7: Ingestion adapters
+  25. ingestion/adapters/datadog/adapter.py
+  26. ingestion/adapters/datadog/client.py
+  27. ingestion/adapters/github/adapter.py
+  28. ingestion/adapters/testparser/adapter.py
+  29. ingestion/adapters/documentation/adapter.py
+
+PHASE 8: API
+  30. api/models/request.py
+  31. api/models/response.py
+  32. api/handlers/analyze.py
+  33. api/main.py
+
+PHASE 9: Webhook
+  34. webhook/detector/change_detector.py
+  35. webhook/main.py
+
+PHASE 10: CLI
+  36. cli/commands/ingest.py
+  37. cli/main.py
+
+STEP 6: Create config files
+================================================================================
+
+- pyproject.toml → Dependencies
+- requirements.txt
+- docker-compose.yml
+- .env.example
+
+STEP 7: Create documentation
+================================================================================
+
+Ask Claude to create each doc:
+
+- docs/SETUP.md
+- docs/ARCHITECTURE.md
+- docs/API.md
+
+STEP 8: Start coding!
+================================================================================
+
+Now you have complete structure. Start with:
+
+```bash
+make install      # Install deps
+make dev          # Start services
+make test         # Run tests
+```
+
+================================================================================
+
+TIPS FOR USING CLAUDE CODE
+================================================================================
+
+1. Keep prompts focused
+   ✅ "Create core/adapters/base.py with IngestionAdapter interface"
+   ❌ "Create the whole core module"
+
+2. Reference existing files
+   "Create core/rules/engine.py that uses core/rules/rule.py (already created)"
+
+3. Ask for tests too
+   "Also create core/tests/test_adapters.py with pytest tests"
+
+4. Ask for examples
+   "Also show example usage in docstring"
+
+5. Ask for imports
+   "Include all necessary imports (typing, pydantic, etc)"
+
+================================================================================
+
+EXAMPLE CONVERSATION WITH CLAUDE
+================================================================================
+
+You: "Create impact-analysis-system/core/adapters/base.py
+
+This file defines the IngestionAdapter abstract base class.
+
+Required:
+- Abstract class IngestionAdapter
+- Methods: extract(), validate(), get_coverage(), get_identifier(), get_version()
+- Use Python ABC from abc module
+- Include type hints using types from core/types/
+- Include docstrings
+- Make it a Pydantic BaseModel where appropriate"
+
+Claude: [Creates base.py with full implementation]
+
+You: "Great! Now create core/adapters/registry.py
+
+This file implements AdapterRegistry that:
+- Registers adapters
+- Executes them in priority order
+- Merges results
+- Validates output
+- Loads to Neo4j
+
+It should:
+- Use the IngestionAdapter from base.py
+- Have method run_all(config) that orchestrates everything
+- Support enable/disable adapters
+- Handle errors gracefully"
+
+Claude: [Creates registry.py with full implementation]
+
+================================================================================
+
+YOU'RE READY!
+
+Next: Copy python_monorepo_structure.md and start creating files.
+
+Questions? Refer back to:
+- complete_system_design.md (architecture details)
+- QUICK_REFERENCE.md (overview)
+- extensible_ingestion_framework.md (how adapters work)
+
+================================================================================
