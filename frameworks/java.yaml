@@ -1,0 +1,52 @@
+name: java
+language: java
+detectors:
+  - any_file_glob: ["*.java", "**/*.java"]
+tests:
+  function_name_prefixes: []
+  decorator_callees:
+    - "Test"
+    - "ParameterizedTest"
+    - "RepeatedTest"
+    - "TestFactory"
+    - "TestTemplate"
+  test_path_globs:
+    - "**/src/test/java/**"
+    - "**/*Test.java"
+    - "**/*Tests.java"
+    - "**/*IT.java"
+  test_path_prefixes: []
+mocks:
+  field_annotations:
+    - "Mock"
+    - "MockBean"
+    - "Spy"
+    - "InjectMocks"
+  mock_call_signatures: ["mock"]
+http_clients:
+  external_modules:
+    - java.net.http
+    - java.sql
+    - javax.sql
+    - javax.persistence
+    - jakarta.persistence
+    - okhttp3
+    - retrofit2
+    - com.squareup.okhttp
+    - org.apache.http
+    - org.apache.hc
+    - org.springframework.web.client
+    - org.springframework.web.reactive.function.client
+    - org.springframework.jdbc
+    - org.springframework.kafka
+    - org.springframework.amqp
+    - org.springframework.data.redis
+    - redis.clients
+    - org.apache.kafka
+    - software.amazon.awssdk
+    - com.amazonaws
+    - io.grpc
+    - com.mongodb
+    - org.neo4j.driver
+notes: |
+  Base Java knowledge spanning JUnit 4, JUnit 5 (Jupiter), TestNG, and Mockito.

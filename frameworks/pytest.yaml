@@ -1,0 +1,24 @@
+name: pytest
+language: python
+detectors:
+  - any_import_starts_with: ["pytest"]
+  - any_file_glob: ["**/conftest.py", "**/pytest.ini", "**/pyproject.toml"]
+tests:
+  function_name_prefixes: ["test_"]
+  decorator_callees:
+    - "pytest.mark.parametrize"
+    - "pytest.fixture"
+  integration_markers:
+    - "pytest.mark.integration"
+    - "mark.integration"
+  e2e_markers:
+    - "pytest.mark.e2e"
+    - "mark.e2e"
+  test_path_globs: ["**/tests/**", "**/test_*.py", "**/*_test.py"]
+  test_path_prefixes:
+    - "tests/integration"
+    - "tests/e2e"
+    - "tests/component"
+notes: |
+  pytest-specific markers and path conventions layered on top of base Python
+  test naming.

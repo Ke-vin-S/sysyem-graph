@@ -1,0 +1,20 @@
+name: flask
+language: python
+detectors:
+  - any_import_starts_with: ["flask"]
+routes:
+  decorator_callee_patterns:
+    - "{any}.route"
+    - "{any}.get"
+    - "{any}.post"
+    - "{any}.put"
+    - "{any}.delete"
+    - "{any}.patch"
+  decorator_methods: ["route", "get", "post", "put", "delete", "patch"]
+  mount_calls:
+    - method: "register_blueprint"
+      prefix_kwarg: "url_prefix"
+      router_arg: 0
+  base_path_sources: []
+notes: |
+  Flask app routes and Blueprint mounts (url_prefix on register_blueprint).

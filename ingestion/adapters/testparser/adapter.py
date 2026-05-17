@@ -1,29 +1,63 @@
-"""TestParserAdapter: walk local repos, parse test files, emit TestCase records."""
+"""TestParserAdapter — walks local repos and emits a full graph slice per repo.
+
+What "full graph slice" means:
+
+  * one Service node per repo                       (so Neo4j has a root node)
+  * CodeArtifact(type=endpoint) per HTTP route      (from EndpointResolver)
+  * CodeArtifact(type=function|class|method) per
+    top-level named code surface                    (from FunctionResolver)
+  * TestCase per test function                      (from TestResolver)
+  * TestCase.covers_artifacts populated by linking
+    test-file imports back to artifacts             (CoverageResolver)
+
+The output is intentionally Neo4j-ready: every node has a stable ID, every
+relationship is encodable from foreign keys on the records, and
+TestCase.covers_artifacts gives the explicit (TestCase)-[:COVERS]->
+(CodeArtifact) edges.
+"""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.adapters.base import AdapterResult, Coverage, IngestionAdapter, IngestionContext
-from core.types import LineRange, TestCase
+from core.facts import FactKind, FactTree
+from core.frameworks import compose, detect_frameworks, load_library
+from core.frameworks.library import DEFAULT_FRAMEWORKS_DIR, FrameworkLibrary
+from core.resolvers import (
+    CoverageResolver,
+    EndpointResolver,
+    FunctionResolver,
+    ResolverContext,
+    TestResolver,
+)
+from core.types import CodeArtifact, LineRange, Service, TestCase
 from core.types.errors import IngestionError
-from ingestion.adapters.testparser.classifier import TestClassifier
+from core.walker import Walker
 from ingestion.adapters.testparser.config import TestParserAdapterConfig
-from ingestion.adapters.testparser.coverage import CoverageEstimator
-from ingestion.parsers import JavaParser, Parser, PythonParser
-from ingestion.parsers.parser import ParsedTest
 
 logger = logging.getLogger(__name__)
 
 
-class TestParserAdapter(IngestionAdapter):
-    """Walks `config.root`, parses tests, classifies them, emits TestCase records.
+# Map file-suffix → coarse language name. Used only to set Service.language.
+_LANG_BY_SUFFIX: dict[str, str] = {
+    ".py": "python",
+    ".java": "java",
+    ".go": "go",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".kt": "kotlin",
+    ".rb": "ruby",
+    ".rs": "rust",
+}
 
-    Priority 70 — runs after Datadog/GitHub. It depends on a checked-out
-    filesystem snapshot of the repos, not on remote API access.
-    """
+
+class TestParserAdapter(IngestionAdapter):
+    """Walks `config.root`, builds a FactTree per repo, resolves the full slice."""
 
     name = "testparser"
     priority = 70
@@ -32,15 +66,20 @@ class TestParserAdapter(IngestionAdapter):
         self,
         config: TestParserAdapterConfig,
         *,
-        parsers: Iterable[Parser] | None = None,
-        classifier: TestClassifier | None = None,
-        coverage_estimator: CoverageEstimator | None = None,
+        walker: Walker | None = None,
+        test_resolver: TestResolver | None = None,
+        function_resolver: FunctionResolver | None = None,
+        endpoint_resolver: EndpointResolver | None = None,
+        coverage_resolver: CoverageResolver | None = None,
+        library: FrameworkLibrary | None = None,
     ) -> None:
         self._config = config
-        self._parsers = tuple(parsers) if parsers else (PythonParser(), JavaParser())
-        self._classifier = classifier or TestClassifier()
-        self._coverage = coverage_estimator or CoverageEstimator(module_to_repo={})
-        self._suffixes = tuple({suffix for parser in self._parsers for suffix in parser.suffixes})
+        self._walker = walker or Walker()
+        self._test_resolver = test_resolver or TestResolver()
+        self._function_resolver = function_resolver or FunctionResolver()
+        self._endpoint_resolver = endpoint_resolver or EndpointResolver()
+        self._coverage_resolver = coverage_resolver or CoverageResolver()
+        self._library = library or load_library(DEFAULT_FRAMEWORKS_DIR)
 
     def extract(self, context: IngestionContext) -> AdapterResult:
         result = AdapterResult(adapter=self.name)
@@ -51,18 +90,7 @@ class TestParserAdapter(IngestionAdapter):
         repo_dirs = self._discover_repos(root, context.repos)
         scanned = 0
         for repo_dir in repo_dirs:
-            repo_id = repo_dir.name
-            for file in _iter_test_files(repo_dir, self._config.excluded_dirs, self._suffixes):
-                parser = self._parser_for(file)
-                if parser is None:
-                    continue
-                try:
-                    content = file.read_text(encoding="utf-8", errors="replace")
-                except OSError as exc:
-                    result.warnings.append(f"{file}: {exc}")
-                    continue
-                for parsed in parser.parse(file, content):
-                    result.tests.append(self._to_test_case(parsed, repo_id=repo_id, file=file, root=repo_dir))
+            self._extract_repo(repo_dir, context, result)
             scanned += 1
 
         result.coverage = Coverage(
@@ -72,70 +100,127 @@ class TestParserAdapter(IngestionAdapter):
         )
         return result
 
+    def _extract_repo(
+        self, repo_dir: Path, context: IngestionContext, result: AdapterResult
+    ) -> None:
+        repo_id = repo_dir.name
+        repo_root_abs = str(repo_dir.resolve())
+        tree = self._walker.walk(repo_dir, repo_id=repo_id)
+        detected = detect_frameworks(tree, self._library)
+        effective = tuple(compose(fw, None) for fw in detected)
+        ctx = ResolverContext(tree=tree, frameworks=effective, repo_id=repo_id)
+
+        # 1. Service node for this repo. Language is the majority extension.
+        service = self._build_service(repo_dir, tree, detected, context.now)
+        result.services.append(service)
+
+        # 2. Code structure artifacts (functions/classes/methods) — keyed by
+        #    paths relative to the repo root so they match coverage lookups.
+        function_artifacts = [
+            self._rebase(artifact, repo_root_abs) for artifact in self._function_resolver.resolve(ctx)
+        ]
+
+        # 3. Endpoint artifacts.
+        endpoint_artifacts: list[CodeArtifact] = []
+        for endpoint in self._endpoint_resolver.resolve(ctx):
+            handler_rel = _make_relative(endpoint.handler_file, repo_root_abs)
+            endpoint_artifacts.append(
+                CodeArtifact(
+                    id=f"endpoint:{repo_id}:{endpoint.method}:{endpoint.full_path}",
+                    repoId=repo_id,
+                    type="endpoint",
+                    name=f"{endpoint.method} {endpoint.full_path}",
+                    file=handler_rel,
+                    lineRange=LineRange(start=1, end=1),
+                    isPublic=True,
+                )
+            )
+
+        artifacts = function_artifacts + endpoint_artifacts
+        result.artifacts.extend(artifacts)
+
+        # 4. Tests.
+        tests = self._test_resolver.resolve(ctx)
+        # Rewrite test file paths to repo-relative for stable IDs across runs.
+        tests = [self._rebase_test(t, repo_root_abs, repo_id) for t in tests]
+
+        # 5. Coverage edges — link tests to artifacts via the test file's imports.
+        coverage = self._coverage_resolver.resolve(
+            tree=tree, tests=tests, artifacts=artifacts, repo_root=repo_root_abs
+        )
+        result.tests.extend(coverage.tests)
+
+    def _build_service(
+        self,
+        repo_dir: Path,
+        tree: FactTree,
+        detected_frameworks,
+        now: datetime,
+    ) -> Service:
+        language = self._infer_language(tree)
+        framework_names = ",".join(sorted({fw.name for fw in detected_frameworks})) or "unknown"
+        return Service(
+            id=repo_dir.name,
+            name=repo_dir.name,
+            repoUrl=f"file://{repo_dir.resolve()}",
+            language=language,
+            framework=framework_names,
+            owner="unknown",
+            createdAt=now,
+            lastUpdatedAt=now,
+            isActive=True,
+        )
+
+    def _infer_language(self, tree: FactTree) -> str:
+        suffix_counts: Counter[str] = Counter()
+        for fact in tree.where(kind=FactKind.SYMBOL):
+            suffix = Path(fact.file).suffix.lower()
+            if suffix:
+                suffix_counts[suffix] += 1
+        if not suffix_counts:
+            return "unknown"
+        most_common_suffix, _ = suffix_counts.most_common(1)[0]
+        return _LANG_BY_SUFFIX.get(most_common_suffix, "unknown")
+
+    def _rebase(self, artifact: CodeArtifact, repo_root_abs: str) -> CodeArtifact:
+        """Rewrite an artifact's `file` to repo-relative and rebuild its ID."""
+        rel = _make_relative(artifact.file, repo_root_abs)
+        if rel == artifact.file:
+            return artifact
+        # Rebuild ID with the rel path so it matches what callers will look up.
+        prefix = artifact.id.split(":", 2)[0]  # 'fn', 'class', 'method', 'endpoint'
+        new_id = f"{prefix}:{artifact.repo_id}:{rel}:{artifact.name}"
+        if prefix == "method":
+            # Method IDs are `method:repo:file:Class.name` — preserve the qualifier.
+            qualifier_suffix = artifact.id.rsplit(":", 1)[-1]
+            new_id = f"method:{artifact.repo_id}:{rel}:{qualifier_suffix}"
+        return artifact.model_copy(update={"file": rel, "id": new_id})
+
+    def _rebase_test(self, test: TestCase, repo_root_abs: str, repo_id: str) -> TestCase:
+        rel = _make_relative(test.file, repo_root_abs)
+        if rel == test.file:
+            return test
+        new_id = f"test:{repo_id}:{rel}:{test.name}"
+        return test.model_copy(update={"file": rel, "id": new_id})
+
     def _discover_repos(self, root: Path, repos_filter: tuple[str, ...]) -> list[Path]:
         if not root.is_dir():
             return [root]
-        candidates = [p for p in sorted(root.iterdir()) if p.is_dir() and p.name not in self._config.excluded_dirs]
+        candidates = [
+            p
+            for p in sorted(root.iterdir())
+            if p.is_dir() and p.name not in self._config.excluded_dirs
+        ]
         if repos_filter:
             allowed = set(repos_filter)
             candidates = [p for p in candidates if p.name in allowed]
         return candidates or [root]
 
-    def _parser_for(self, file: Path) -> Parser | None:
-        for parser in self._parsers:
-            if parser.matches(file):
-                return parser
-        return None
 
-    def _to_test_case(self, parsed: ParsedTest, *, repo_id: str, file: Path, root: Path) -> TestCase:
-        classification = self._classifier.classify(parsed)
-        affected = self._coverage.estimate(parsed, own_repo=repo_id)
-        rel_path = file.relative_to(root) if file.is_relative_to(root) else file
-        return TestCase(
-            id=f"test:{repo_id}:{rel_path}:{parsed.name}",
-            repoId=repo_id,
-            type=classification.type,
-            name=parsed.name,
-            file=str(rel_path),
-            lineRange=LineRange(start=parsed.line_start, end=parsed.line_end),
-            duration_ms=0,
-            flakiness_score=0.0,
-            priority="HIGH" if classification.type.value == "INTEGRATION" else "MEDIUM",
-            affectedRepos=affected,
-        )
-
-
-def _iter_test_files(
-    root: Path, excluded: tuple[str, ...], suffixes: tuple[str, ...]
-) -> Iterable[Path]:
-    excluded_set = set(excluded)
-    for suffix in suffixes:
-        for path in root.rglob(f"*{suffix}"):
-            if any(part in excluded_set for part in path.parts):
-                continue
-            if _looks_like_test_file(path):
-                yield path
-
-
-def _looks_like_test_file(path: Path) -> bool:
-    name = path.name
-    parts = path.parts
-    if "tests" in parts or "test" in parts:
-        return True
-    suffix = path.suffix
-    if suffix == ".py":
-        return name.startswith("test_") or name.endswith("_test.py")
-    if suffix == ".java":
-        # JUnit/Maven conventions: `FooTest.java`, `FooTests.java`, `FooIT.java`,
-        # or anything under `src/test/java`. We also catch `Test*.java` for
-        # codebases that prefix.
-        if "java" in parts and "test" in parts:
-            return True
-        stem = name[: -len(".java")]
-        return (
-            stem.endswith("Test")
-            or stem.endswith("Tests")
-            or stem.endswith("IT")
-            or stem.startswith("Test")
-        )
-    return False
+def _make_relative(file: str, repo_root_abs: str) -> str:
+    if not repo_root_abs or not file:
+        return file
+    try:
+        return str(Path(file).resolve().relative_to(repo_root_abs))
+    except ValueError:
+        return file

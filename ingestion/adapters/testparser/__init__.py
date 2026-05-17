@@ -1,13 +1,6 @@
-"""Test parser ingestion adapter: walks local repos and classifies tests."""
+"""Test parser ingestion adapter — Walker + TestResolver driven."""
 
 from ingestion.adapters.testparser.adapter import TestParserAdapter
-from ingestion.adapters.testparser.classifier import TestClassifier
 from ingestion.adapters.testparser.config import TestParserAdapterConfig
-from ingestion.adapters.testparser.coverage import CoverageEstimator
 
-__all__ = [
-    "CoverageEstimator",
-    "TestClassifier",
-    "TestParserAdapter",
-    "TestParserAdapterConfig",
-]
+__all__ = ["TestParserAdapter", "TestParserAdapterConfig"]

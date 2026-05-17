@@ -1,0 +1,21 @@
+name: spring
+language: java
+detectors:
+  - any_import_starts_with: ["org.springframework"]
+  - any_config_key: ["spring.", "server."]
+routes:
+  annotation_class_prefix: ["RequestMapping"]
+  annotation_method_names:
+    - "GetMapping"
+    - "PostMapping"
+    - "PutMapping"
+    - "DeleteMapping"
+    - "PatchMapping"
+    - "RequestMapping"
+  base_path_sources:
+    - config_key: "server.servlet.context-path"
+    - config_key: "spring.mvc.servlet.path"
+notes: |
+  Spring Web MVC controller and RestController route composition. Base path
+  derives from application.yml (server.servlet.context-path or
+  spring.mvc.servlet.path).

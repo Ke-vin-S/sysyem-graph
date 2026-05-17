@@ -1,0 +1,39 @@
+name: python
+language: python
+detectors:
+  - any_file_glob: ["*.py", "**/*.py"]
+tests:
+  function_name_prefixes: ["test_"]
+  decorator_callees: []
+  test_path_globs: ["**/tests/**", "**/test_*.py", "**/*_test.py"]
+  test_path_prefixes: []
+mocks:
+  decorator_callees:
+    - "patch"
+    - "patch.object"
+    - "patch.multiple"
+    - "mock.patch"
+  with_callees:
+    - "patch"
+    - "mock.patch"
+  mock_call_signatures: ["Mock", "MagicMock"]
+http_clients:
+  external_modules:
+    - requests
+    - httpx
+    - aiohttp
+    - urllib
+    - urllib3
+    - psycopg2
+    - psycopg
+    - sqlalchemy
+    - redis
+    - boto3
+    - kafka
+    - confluent_kafka
+    - pymongo
+    - neo4j
+    - grpc
+notes: |
+  Base Python knowledge: pytest-compatible test naming, unittest.mock patterns,
+  common stdlib/HTTP/DB client libraries.

@@ -60,10 +60,15 @@ def run(
         typer.secho(f"error: {error}", fg=typer.colors.RED)
 
     out.mkdir(parents=True, exist_ok=True)
-    _dump(out / "services.json", [s.model_dump(mode="json") for s in report.merged.services.values()])
-    _dump(out / "connections.json", [c.model_dump(mode="json") for c in report.merged.connections.values()])
-    _dump(out / "artifacts.json", [a.model_dump(mode="json") for a in report.merged.artifacts.values()])
-    _dump(out / "tests.json", [t.model_dump(mode="json") for t in report.merged.tests.values()])
+    services = list(report.merged.services.values())
+    connections = list(report.merged.connections.values())
+    artifacts = list(report.merged.artifacts.values())
+    tests = list(report.merged.tests.values())
+    _dump(out / "services.json", [s.model_dump(mode="json") for s in services])
+    _dump(out / "connections.json", [c.model_dump(mode="json") for c in connections])
+    _dump(out / "artifacts.json", [a.model_dump(mode="json") for a in artifacts])
+    _dump(out / "tests.json", [t.model_dump(mode="json") for t in tests])
+    _dump(out / "relationships.json", _build_relationships(services, connections, artifacts, tests))
     typer.echo(f"wrote merged records to {out}")
 
     if report.failures or report.validation.errors:
@@ -83,6 +88,41 @@ def _register_adapters(
         cfg = TestParserAdapterConfig.from_settings(settings.testparser)
         if cfg.root.exists():
             registry.register(TestParserAdapter(cfg))
+
+
+def _build_relationships(services, connections, artifacts, tests) -> list[dict[str, Any]]:
+    """Materialize the Neo4j edge list from foreign keys on the records.
+
+    Edges emitted (matching the Neo4j schema in docs/QUICK_REFERENCE.md):
+      (Service)-[:CONTAINS]->(CodeArtifact)
+      (Service)-[:DEFINES]->(TestCase)
+      (TestCase)-[:COVERS]->(CodeArtifact)
+      (Service)-[:INITIATES]->(ExternalConnection)
+      (ExternalConnection)-[:TARGETS]->(Service)        when target_service_id known
+      (CodeArtifact)-[:EXPOSES]->(ExternalConnection)    from artifact.external_connections
+    """
+    service_ids = {s.id for s in services}
+    edges: list[dict[str, Any]] = []
+
+    for artifact in artifacts:
+        if artifact.repo_id in service_ids:
+            edges.append({"src": artifact.repo_id, "rel": "CONTAINS", "dst": artifact.id})
+        for conn_id in artifact.external_connections:
+            edges.append({"src": artifact.id, "rel": "EXPOSES", "dst": conn_id})
+
+    for test in tests:
+        if test.repo_id in service_ids:
+            edges.append({"src": test.repo_id, "rel": "DEFINES", "dst": test.id})
+        for artifact_id in test.covers_artifacts:
+            edges.append({"src": test.id, "rel": "COVERS", "dst": artifact_id})
+
+    for conn in connections:
+        if conn.source_service_id in service_ids:
+            edges.append({"src": conn.source_service_id, "rel": "INITIATES", "dst": conn.id})
+        if conn.target_service_id and conn.target_service_id in service_ids:
+            edges.append({"src": conn.id, "rel": "TARGETS", "dst": conn.target_service_id})
+
+    return edges
 
 
 def _dump(path: Path, payload: list[dict[str, Any]]) -> None:

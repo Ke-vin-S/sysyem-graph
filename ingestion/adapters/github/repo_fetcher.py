@@ -1,32 +1,32 @@
 """Turn a RepoSnapshot into Service + CodeArtifact records.
 
-CodeArtifact extraction here is intentionally cheap: we identify endpoint
-declarations and top-level function defs by pattern matching, not full AST.
-The `testparser` adapter does deeper AST work; this one is just enough to
-populate the graph with public-API surface.
+This module used to do its own regex-based artifact extraction. It now
+delegates to the same Walker + Grammars + Resolvers stack that the
+testparser adapter uses, so endpoint reconstruction is cross-file-aware
+(prefix chains, config base paths, class-level annotations).
+
+The contract is unchanged: `RepoFetcher.to_records(snapshot) -> (Service,
+list[CodeArtifact])`. What changes is that endpoint artifacts now carry
+full reconstructed paths instead of just whatever a single regex matched.
 """
 
 from __future__ import annotations
 
-import re
-from collections.abc import Iterable
-from datetime import datetime
+import logging
+import os
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 
+from core.facts import FactKind
+from core.frameworks import compose, detect_frameworks, load_library
+from core.frameworks.library import DEFAULT_FRAMEWORKS_DIR, FrameworkLibrary
+from core.resolvers import EndpointResolver, ResolverContext
 from core.types import CodeArtifact, LineRange, Service
+from core.walker import Walker
 from ingestion.adapters.github.client import RepoFile, RepoSnapshot
 
-# Common HTTP framework decorator patterns. Not exhaustive, but cheap and
-# good enough for Phase 1 — the testparser adapter does the real AST work.
-_HTTP_DECORATORS = re.compile(
-    r"""
-    @(?:app|router|api|blueprint)\.
-    (?P<method>get|post|put|delete|patch|head|options|route)
-    \s*\(\s*(?P<args>[^)]*)\)
-    """,
-    re.VERBOSE | re.IGNORECASE,
-)
-
-_PY_FUNCDEF = re.compile(r"^\s*(?:async\s+)?def\s+(?P<name>[A-Za-z_][\w]*)\s*\(", re.MULTILINE)
+logger = logging.getLogger(__name__)
 
 
 def service_from_snapshot(snapshot: RepoSnapshot) -> Service:
@@ -43,99 +43,106 @@ def service_from_snapshot(snapshot: RepoSnapshot) -> Service:
     )
 
 
-def artifacts_from_snapshot(snapshot: RepoSnapshot) -> list[CodeArtifact]:
-    out: list[CodeArtifact] = []
-    for f in snapshot.files:
-        if f.content is None:
-            continue
-        out.extend(_endpoint_artifacts(snapshot.full_name, f))
-        if f.path.endswith(".py") and not _looks_like_test(f.path):
-            out.extend(_python_function_artifacts(snapshot.full_name, f))
-    return out
-
-
-def _endpoint_artifacts(repo_id: str, file: RepoFile) -> Iterable[CodeArtifact]:
-    if file.content is None:
-        return
-    for match in _HTTP_DECORATORS.finditer(file.content):
-        path = _extract_path(match.group("args"))
-        if path is None:
-            continue
-        method = match.group("method").upper()
-        if method == "ROUTE":
-            method = _extract_method(match.group("args")) or "*"
-        line_start = file.content.count("\n", 0, match.start()) + 1
-        yield CodeArtifact(
-            id=f"endpoint:{repo_id}:{method}:{path}",
-            repoId=repo_id,
-            type="endpoint",
-            name=f"{method} {path}",
-            file=file.path,
-            lineRange=LineRange(start=line_start, end=line_start),
-            isPublic=True,
-        )
-
-
-def _python_function_artifacts(repo_id: str, file: RepoFile) -> Iterable[CodeArtifact]:
-    if file.content is None:
-        return
-    for match in _PY_FUNCDEF.finditer(file.content):
-        name = match.group("name")
-        if name.startswith("_"):
-            continue
-        line_start = file.content.count("\n", 0, match.start()) + 1
-        yield CodeArtifact(
-            id=f"fn:{repo_id}:{file.path}:{name}",
-            repoId=repo_id,
-            type="function",
-            name=name,
-            file=file.path,
-            lineRange=LineRange(start=line_start, end=line_start),
-            isPublic=True,
-        )
-
-
-_PATH_LITERAL = re.compile(r"""['"]([^'"]+)['"]""")
-_METHODS_LIST = re.compile(r"methods\s*=\s*\[([^\]]+)\]", re.IGNORECASE)
-
-
-def _extract_path(args: str) -> str | None:
-    match = _PATH_LITERAL.search(args)
-    if not match:
-        return None
-    path = match.group(1)
-    if not path.startswith("/"):
-        return None
-    return path
-
-
-def _extract_method(args: str) -> str | None:
-    match = _METHODS_LIST.search(args)
-    if not match:
-        return None
-    methods = _PATH_LITERAL.findall(match.group(1))
-    return methods[0].upper() if methods else None
-
-
-def _looks_like_test(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1]
-    return name.startswith("test_") or name.endswith("_test.py") or "/tests/" in path
-
-
 class RepoFetcher:
-    """Convenience facade combining service + artifact extraction.
+    """Build Service + CodeArtifact records from a RepoSnapshot.
 
-    Holds no state; exists so callers can substitute a different extraction
-    strategy in tests without monkeypatching free functions.
+    Internally writes the snapshot's files to a temp dir and runs the Walker
+    over them. This is cheap (snapshots are filtered to source files only)
+    and avoids duplicating the walker/grammar/resolver logic just for the
+    GitHub path.
     """
+
+    def __init__(
+        self,
+        *,
+        walker: Walker | None = None,
+        resolver: EndpointResolver | None = None,
+        library: FrameworkLibrary | None = None,
+    ) -> None:
+        self._walker = walker or Walker()
+        self._resolver = resolver or EndpointResolver()
+        self._library = library or load_library(DEFAULT_FRAMEWORKS_DIR)
 
     def to_records(self, snapshot: RepoSnapshot) -> tuple[Service, list[CodeArtifact]]:
         service = service_from_snapshot(snapshot)
-        artifacts = artifacts_from_snapshot(snapshot)
+        artifacts = self._artifacts(snapshot)
         return service, artifacts
+
+    def _artifacts(self, snapshot: RepoSnapshot) -> list[CodeArtifact]:
+        with tempfile.TemporaryDirectory(prefix="sg-github-") as tmp:
+            root = Path(tmp)
+            for repo_file in snapshot.files:
+                if repo_file.content is None:
+                    continue
+                path = root / repo_file.path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    path.write_text(repo_file.content, encoding="utf-8")
+                except OSError as exc:
+                    logger.warning("repo_fetcher: write failed for %s: %s", repo_file.path, exc)
+
+            tree = self._walker.walk(root, repo_id=snapshot.full_name)
+            detected = detect_frameworks(tree, self._library)
+            effective = tuple(compose(fw, None) for fw in detected)
+            endpoints = self._resolver.resolve(
+                ResolverContext(tree=tree, frameworks=effective, repo_id=snapshot.full_name)
+            )
+
+            artifacts: list[CodeArtifact] = []
+            for endpoint in endpoints:
+                # Normalize the handler file path back to repo-relative.
+                rel_file = _relative_to(endpoint.handler_file, root)
+                artifacts.append(
+                    CodeArtifact(
+                        id=_endpoint_id(snapshot.full_name, endpoint.method, endpoint.full_path),
+                        repoId=snapshot.full_name,
+                        type="endpoint",
+                        name=f"{endpoint.method} {endpoint.full_path}",
+                        file=rel_file,
+                        lineRange=LineRange(start=1, end=1),
+                        isPublic=True,
+                    )
+                )
+
+            # Public top-level functions (no leading underscore, no enclosing
+            # class) become `function` CodeArtifacts. This used to live in a
+            # regex-based extractor; we now drive it off SYMBOL facts.
+            for symbol in tree.where(kind=FactKind.SYMBOL):
+                if symbol.data.get("sym_kind") != "function":
+                    continue
+                name = str(symbol.data.get("name", ""))
+                if not name or name.startswith("_"):
+                    continue
+                if symbol.data.get("enclosing_class"):
+                    continue
+                rel_file = _relative_to(symbol.file, root)
+                artifacts.append(
+                    CodeArtifact(
+                        id=f"fn:{snapshot.full_name}:{rel_file}:{name}",
+                        repoId=snapshot.full_name,
+                        type="function",
+                        name=name,
+                        file=rel_file,
+                        lineRange=LineRange(
+                            start=symbol.line,
+                            end=symbol.line_end or symbol.line,
+                        ),
+                        isPublic=True,
+                    )
+                )
+            return artifacts
 
     @staticmethod
     def now() -> datetime:
-        from datetime import timezone
-
         return datetime.now(timezone.utc)
+
+
+def _endpoint_id(repo_id: str, method: str, path: str) -> str:
+    return f"endpoint:{repo_id}:{method}:{path}"
+
+
+def _relative_to(file: str, root: Path) -> str:
+    try:
+        return os.path.relpath(file, root)
+    except ValueError:
+        return file

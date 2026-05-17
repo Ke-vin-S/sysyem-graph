@@ -1,6 +1,6 @@
 services:
   neo4j:
-    image: neo4j:5.20-community
+    image: docker.io/library/neo4j:5.20-community
     container_name: system-graph-neo4j
     restart: unless-stopped
     ports:
@@ -13,13 +13,19 @@ services:
       NEO4J_server_memory_pagecache_size: 1G
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    # Named volumes work cleanly under both docker and rootless podman.
+    # Use bind mounts only on hosts where you've verified ownership.
     volumes:
-      - ./neo4j-data:/data
-      - ./neo4j-logs:/logs
-      - ./neo4j-import:/var/lib/neo4j/import
-      - ./neo4j-plugins:/plugins
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+      - neo4j-plugins:/plugins
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
+
+volumes:
+  neo4j-data:
+  neo4j-logs:
+  neo4j-plugins:

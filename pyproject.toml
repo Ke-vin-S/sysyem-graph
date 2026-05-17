@@ -45,6 +45,7 @@ dev = [
 
 [project.scripts]
 sg-ingest = "ingestion.cli:app"
+sg-graph = "core.graph.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -54,7 +55,7 @@ exclude = ["tests*", "docs*", ".venv*"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
-testpaths = ["core/tests", "ingestion", "tests"]
+testpaths = ["core", "ingestion", "tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*Suite", "*Tests"]
 markers = [

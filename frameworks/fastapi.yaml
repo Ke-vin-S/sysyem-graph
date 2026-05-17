@@ -1,0 +1,25 @@
+name: fastapi
+language: python
+detectors:
+  - any_import_starts_with: ["fastapi", "starlette"]
+routes:
+  decorator_callee_patterns:
+    - "{any}.get"
+    - "{any}.post"
+    - "{any}.put"
+    - "{any}.delete"
+    - "{any}.patch"
+    - "{any}.head"
+    - "{any}.options"
+  decorator_methods: ["get", "post", "put", "delete", "patch", "head", "options"]
+  mount_calls:
+    - method: "include_router"
+      prefix_kwarg: "prefix"
+      router_arg: 0
+    - method: "mount"
+      prefix_arg: 0
+  base_path_sources:
+    - callee: "FastAPI"
+      kwarg: "root_path"
+notes: |
+  Captures FastAPI/Starlette route declarations and prefix composition.

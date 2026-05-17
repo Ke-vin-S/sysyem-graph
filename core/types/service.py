@@ -165,3 +165,8 @@ class TestCase(_Frozen):
     priority: str = Field(default="MEDIUM")
     affected_repos: tuple[str, ...] = Field(default_factory=tuple, alias="affectedRepos")
     """Repo IDs this test exercises (its own, plus any it integration-tests against)."""
+
+    covers_artifacts: tuple[str, ...] = Field(default_factory=tuple, alias="coversArtifacts")
+    """IDs of CodeArtifacts this test exercises. Populated by CoverageResolver
+    from the test file's IMPORT facts. Materialized as (TestCase)-[:COVERS]->
+    (CodeArtifact) edges in Neo4j."""

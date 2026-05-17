@@ -37,3 +37,4 @@ neo4j-plugins/
 *.csv.gz
 out/
 artifacts/
+.system-graph/
