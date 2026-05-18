@@ -314,9 +314,17 @@ class TestParserAdapter(IngestionAdapter):
 
 
 def _make_relative(file: str, repo_root_abs: str) -> str:
+    """Rebase an absolute path to a repo-relative POSIX string.
+
+    Always returns forward-slash form so the value compares cleanly against
+    the `_rel_to` POSIX-normalized paths the resolvers produce. Without
+    this, Windows runs return `src\\billing\\store.py` from the adapter
+    while resolvers produce `src/billing/store.py` — every enclosing
+    lookup misses and Kafka/Query/DataModel emit zero records.
+    """
     if not repo_root_abs or not file:
         return file
     try:
-        return str(Path(file).resolve().relative_to(repo_root_abs))
+        return Path(file).resolve().relative_to(repo_root_abs).as_posix()
     except ValueError:
         return file
