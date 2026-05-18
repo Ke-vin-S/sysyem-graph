@@ -97,13 +97,23 @@ class FunctionCallResolver:
         by_file_ranges: dict[str, list[tuple[int, int, CodeArtifact]]] = {}
         # Index by (file, name) for callee lookup.
         by_file_name: dict[tuple[str, str], CodeArtifact] = {}
+        # Index methods by (file, class, name) so `Class.method` lookups —
+        # used for self/cls dispatch and typed-parameter resolution — are O(1).
+        methods_by_qualifier: dict[tuple[str, str, str], CodeArtifact] = {}
         for art in artifacts_list:
             by_file_ranges.setdefault(art.file, []).append(
                 (art.line_range.start, art.line_range.end, art)
             )
             by_file_name[(art.file, art.name)] = art
+            if art.type == "method":
+                class_name = _class_of_method(art)
+                if class_name:
+                    methods_by_qualifier[(art.file, class_name, art.name)] = art
 
         alias_map = self._build_alias_map(tree, repo_root, languages)
+        params_by_artifact_id = self._build_params_index(
+            tree, repo_root, repo_id_of(artifacts_list)
+        )
 
         # Per-artifact callee accumulator (preserve insertion order).
         callees: dict[str, list[str]] = {a.id: [] for a in artifacts_list}
@@ -124,6 +134,9 @@ class FunctionCallResolver:
                 languages=languages,
                 alias_map=alias_map,
                 by_file_name=by_file_name,
+                enclosing=enclosing,
+                methods_by_qualifier=methods_by_qualifier,
+                params_by_artifact_id=params_by_artifact_id,
             )
             if callee_artifact is None:
                 continue
@@ -163,6 +176,9 @@ class FunctionCallResolver:
         languages: LanguageLibrary | None,
         alias_map: dict[tuple[str, str], list[tuple[str, str]]],
         by_file_name: dict[tuple[str, str], CodeArtifact],
+        enclosing: CodeArtifact,
+        methods_by_qualifier: dict[tuple[str, str, str], CodeArtifact],
+        params_by_artifact_id: dict[str, dict[str, str]],
     ) -> CodeArtifact | None:
         receiver = str(call.data.get("receiver", ""))
         method = str(call.data.get("method", ""))
@@ -184,6 +200,16 @@ class FunctionCallResolver:
                 target = self._lookup_by_module(
                     module, method, profile, alias_map, by_file_name
                 )
+                if target is not None:
+                    return target
+            return None
+
+        # `self.method()` / `cls.method()` — dispatch to a sibling method on
+        # the enclosing class. Works for single class; doesn't yet walk MRO.
+        if receiver in ("self", "cls") and enclosing.type == "method":
+            class_name = _class_of_method(enclosing)
+            if class_name:
+                target = methods_by_qualifier.get((enclosing.file, class_name, method))
                 if target is not None:
                     return target
             return None
@@ -217,10 +243,69 @@ class FunctionCallResolver:
             if head != name:
                 continue
             sub = name + (f".{rest}" if rest else "")
-            return self._lookup_by_module(
+            target = self._lookup_by_module(
                 f"{module}.{sub}", method, profile, alias_map, by_file_name
             )
+            if target is not None:
+                return target
 
+        # Step 4: receiver is a parameter of the enclosing function with a
+        # known type annotation — dispatch via the type's methods. This is
+        # the FastAPI Depends pattern:
+        #
+        #     def get_user(id: int, service: UserService = Depends(...)):
+        #         return service.get(id)   # -> UserService.get
+        #
+        # Only the top-level head matters here (`service` in `service.foo`).
+        params = params_by_artifact_id.get(enclosing.id)
+        if params:
+            type_name = params.get(head)
+            if type_name:
+                target = self._lookup_method_by_type(
+                    type_name=type_name,
+                    method_name=method,
+                    caller_file=call_file,
+                    profile=profile,
+                    file_imports=file_imports,
+                    alias_map=alias_map,
+                    methods_by_qualifier=methods_by_qualifier,
+                )
+                if target is not None:
+                    return target
+
+        return None
+
+    def _lookup_method_by_type(
+        self,
+        *,
+        type_name: str,
+        method_name: str,
+        caller_file: str,
+        profile: LanguageProfile,
+        file_imports: "_ImportIndex",
+        alias_map: dict[tuple[str, str], list[tuple[str, str]]],
+        methods_by_qualifier: dict[tuple[str, str, str], CodeArtifact],
+    ) -> CodeArtifact | None:
+        """Find `type_name.method_name` defined somewhere reachable from
+        `caller_file`. Tries: same-file class, then any from-import that
+        names `type_name`, walking re-export aliases the same way named
+        function calls already do.
+        """
+        # Same-file class.
+        hit = methods_by_qualifier.get((caller_file, type_name, method_name))
+        if hit is not None:
+            return hit
+        # Type imported via `from MOD import TYPE`.
+        for module, name, _level in file_imports.from_names:
+            if name != type_name:
+                continue
+            for real_module, real_name in self._expand(module, type_name, alias_map):
+                for candidate_file in resolve_candidate_files(real_module, profile):
+                    hit = methods_by_qualifier.get(
+                        (candidate_file, real_name, method_name)
+                    )
+                    if hit is not None:
+                        return hit
         return None
 
     def _lookup_by_module(
@@ -238,6 +323,48 @@ class FunctionCallResolver:
                 if hit is not None:
                     return hit
         return None
+
+    # ---- params index --------------------------------------------------
+
+    def _build_params_index(
+        self,
+        tree: FactTree,
+        repo_root: str | None,
+        repo_id: str,
+    ) -> dict[str, dict[str, str]]:
+        """Map a function/method artifact id -> {param_name: type_hint}.
+
+        Reads `params` data from function/method SYMBOL facts the grammar
+        emits. Mirrors the same id-construction rule FunctionResolver uses
+        so lookups by `enclosing.id` are direct. Methods without an
+        `enclosing_class` are skipped (their artifact id can't be rebuilt).
+        """
+        out: dict[str, dict[str, str]] = {}
+        for sym in tree.where(kind=FactKind.SYMBOL):
+            sym_kind = str(sym.data.get("sym_kind", ""))
+            name = str(sym.data.get("name", ""))
+            if not name or sym_kind not in ("function", "method"):
+                continue
+            params = sym.data.get("params") or ()
+            if not params:
+                continue
+            sym_file = _rel_to(sym.file, repo_root) if repo_root else sym.file
+            if sym_kind == "function":
+                artifact_id = f"fn:{repo_id}:{sym_file}:{name}"
+            else:
+                enclosing_class = str(sym.data.get("enclosing_class", ""))
+                if not enclosing_class:
+                    continue
+                artifact_id = f"method:{repo_id}:{sym_file}:{enclosing_class}.{name}"
+            # `params` arrives as either tuples or [name, type] lists after
+            # JSON round-trips — normalize both.
+            normalized: dict[str, str] = {}
+            for entry in params:
+                if len(entry) >= 2:
+                    normalized[str(entry[0])] = str(entry[1])
+            if normalized:
+                out[artifact_id] = normalized
+        return out
 
     # ---- alias map (same approach as CoverageResolver) -----------------
 
@@ -389,6 +516,30 @@ def _enclosing_artifact(
                 best_span = span
                 best = art
     return best
+
+
+def _class_of_method(artifact: CodeArtifact) -> str:
+    """Pull the class qualifier out of a method artifact's id.
+
+    Method ids follow the convention `method:repo:file:Class.name`. Returns
+    "" for non-method artifacts or any id that doesn't match that shape.
+    """
+    if artifact.type != "method":
+        return ""
+    last = artifact.id.rsplit(":", 1)[-1]
+    return last.split(".", 1)[0] if "." in last else ""
+
+
+def repo_id_of(artifacts: list[CodeArtifact]) -> str:
+    """Pull the (single) repo id out of an artifact list.
+
+    All artifacts in a CallResolution share a repo; this helper exists so the
+    params index can rebuild artifact ids without threading repo_id through
+    the public `resolve` signature.
+    """
+    if not artifacts:
+        return ""
+    return artifacts[0].repo_id
 
 
 def _call_reason(call: Fact) -> str:

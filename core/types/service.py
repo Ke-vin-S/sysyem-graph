@@ -56,6 +56,22 @@ class _Frozen(BaseModel):
     )
 
 
+class _Provenance(_Frozen):
+    """Base for graph nodes that carry pipeline provenance.
+
+    `produced_by` is the pass name (e.g. "test_resolver") that emitted the
+    record. `from_facts` is the Fact IDs consumed to derive it; for nodes
+    derived from many facts, resolvers may store a summary token instead
+    (e.g. ("symbol_count:127",)) to keep the property bounded.
+
+    Both fields default to empty so existing JSON dumps load without
+    rewriting — values arrive as resolvers are migrated pass by pass.
+    """
+
+    produced_by: str = Field(default="", alias="producedBy")
+    from_facts: tuple[str, ...] = Field(default_factory=tuple, alias="fromFacts")
+
+
 class LineRange(_Frozen):
     """Inclusive line range within a source file."""
 
@@ -71,7 +87,7 @@ class LineRange(_Frozen):
         return end
 
 
-class Service(_Frozen):
+class Service(_Provenance):
     """A deployable unit owning a repository.
 
     A Service is the top-level node in the impact graph. Every ExternalConnection
@@ -90,7 +106,7 @@ class Service(_Frozen):
     is_active: bool = Field(default=True, alias="isActive")
 
 
-class ExternalConnection(_Frozen):
+class ExternalConnection(_Provenance):
     """A directed call between two services (or to an external resource).
 
     Sourced primarily from Datadog APM traces but also discoverable via static
@@ -124,7 +140,7 @@ class ExternalConnection(_Frozen):
     last_observed_at: datetime = Field(alias="lastObservedAt")
 
 
-class CodeArtifact(_Frozen):
+class CodeArtifact(_Provenance):
     """A function, endpoint, schema, or other code-level object in a repo.
 
     CodeArtifacts are populated by source-code analysis adapters. When a commit
@@ -151,7 +167,7 @@ class CodeArtifact(_Frozen):
     edges in Neo4j."""
 
 
-class TestCase(_Frozen):
+class TestCase(_Provenance):
     """A single test case identified in a repo.
 
     TestCases are the leaves of the impact graph: when a change affects a Service,

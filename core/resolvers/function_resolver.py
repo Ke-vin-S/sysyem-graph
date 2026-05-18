@@ -24,6 +24,8 @@ from core.types import CodeArtifact, LineRange
 
 
 class FunctionResolver:
+    PASS_NAME = "function_resolver"
+
     def resolve(self, context: ResolverContext) -> list[CodeArtifact]:
         out: list[CodeArtifact] = []
         seen: set[str] = set()
@@ -54,6 +56,8 @@ class FunctionResolver:
             file=fact.file,
             lineRange=LineRange(start=fact.line, end=fact.line_end or fact.line),
             isPublic=_is_public(fact, ctx.languages),
+            producedBy=self.PASS_NAME,
+            fromFacts=(fact.id,),
         )
 
     def _symbol_artifact(self, fact: Fact, ctx: ResolverContext) -> CodeArtifact | None:
@@ -82,6 +86,8 @@ class FunctionResolver:
             file=fact.file,
             lineRange=LineRange(start=fact.line, end=fact.line_end or fact.line),
             isPublic=_is_public(fact, ctx.languages),
+            producedBy=self.PASS_NAME,
+            fromFacts=(fact.id,),
         )
 
 

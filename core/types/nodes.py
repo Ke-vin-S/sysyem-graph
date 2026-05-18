@@ -13,7 +13,7 @@ from enum import StrEnum
 
 from pydantic import Field
 
-from core.types.service import LineRange, _Frozen
+from core.types.service import LineRange, _Provenance
 
 
 # ---- enums --------------------------------------------------------------
@@ -57,7 +57,7 @@ class EdgeSource(StrEnum):
 # ---- nodes --------------------------------------------------------------
 
 
-class Endpoint(_Frozen):
+class Endpoint(_Provenance):
     """An HTTP/RPC endpoint exposed by a service.
 
     Promoted out of `CodeArtifact(type="endpoint")` so the edge fan-out
@@ -83,7 +83,7 @@ class Endpoint(_Frozen):
     is_public: bool = Field(default=True, alias="isPublic")
 
 
-class DataModel(_Frozen):
+class DataModel(_Provenance):
     """A structured data class — Pydantic model, dataclass, ORM entity, etc.
 
     Lets the impact graph answer "if this model changes, what reads/writes it?"
@@ -107,7 +107,7 @@ class DataModel(_Frozen):
     is_public: bool = Field(default=True, alias="isPublic")
 
 
-class Query(_Frozen):
+class Query(_Provenance):
     """A SQL/JPQL query string or ORM call site.
 
     Sourced from CALL facts (`session.execute(text("..."))`, `@Query(...)`,
@@ -130,7 +130,7 @@ class Query(_Frozen):
     """CodeArtifact (function/method) that executes this query, when known."""
 
 
-class KafkaTopic(_Frozen):
+class KafkaTopic(_Provenance):
     """A Kafka topic referenced by at least one producer or consumer.
 
     Topic names are the cross-repo join key: a producer in repo A and a
@@ -145,7 +145,7 @@ class KafkaTopic(_Frozen):
     """Wire-level topic name (e.g. 'user.events')."""
 
 
-class KafkaProducer(_Frozen):
+class KafkaProducer(_Provenance):
     """A code site that publishes to a Kafka topic."""
 
     id: str = Field(min_length=1)
@@ -158,7 +158,7 @@ class KafkaProducer(_Frozen):
     """kafka-python, confluent-kafka, spring-kafka, faust, etc."""
 
 
-class KafkaConsumer(_Frozen):
+class KafkaConsumer(_Provenance):
     """A code site that subscribes to a Kafka topic."""
 
     id: str = Field(min_length=1)
@@ -171,7 +171,7 @@ class KafkaConsumer(_Frozen):
     consumer_group: str = Field(default="", alias="consumerGroup")
 
 
-class Suggestion(_Frozen):
+class Suggestion(_Provenance):
     """A candidate edge proposed by the LLM enhance pass.
 
     Loader writes these MERGE'd into Neo4j with `source="llm"` and the
@@ -199,7 +199,7 @@ class Suggestion(_Frozen):
     model: str = Field(default="")
 
 
-class Mock(_Frozen):
+class Mock(_Provenance):
     """A mocked target inside a test — @patch("..."), patch.object(X, "y"), etc.
 
     `target_artifact_id` is populated when the resolver could bind the patch

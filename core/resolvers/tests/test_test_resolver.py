@@ -152,3 +152,17 @@ def test_java_mocked_external_stays_unit(tmp_path: Path, library) -> None:
     tests = _resolve_tests(tmp_path, library, repo_id="payment-service")
     target = next(t for t in tests if t.name == "testWithMock")
     assert target.type is TestType.UNIT
+
+
+def test_emissions_carry_provenance(tmp_path: Path, library) -> None:
+    _seed(
+        tmp_path,
+        {
+            "auth-service/tests/test_x.py": "def test_addition():\n    assert 1 + 1 == 2\n",
+        },
+    )
+    tests = _resolve_tests(tmp_path, library)
+    target = next(t for t in tests if t.name == "test_addition")
+    assert target.produced_by == "test_resolver"
+    assert len(target.from_facts) >= 1
+    assert all(fid.startswith("fact:") for fid in target.from_facts)

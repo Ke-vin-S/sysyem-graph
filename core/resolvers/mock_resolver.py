@@ -62,6 +62,7 @@ _FALLBACK_PYTHON = LanguageProfile(
 
 
 class MockResolver:
+    PASS_NAME = "mock_resolver"
     _MAX_ALIAS_DEPTH = 5
 
     def resolve(
@@ -170,6 +171,8 @@ class MockResolver:
                 targetArtifactId=target_artifact_id.id if target_artifact_id else None,
                 file=dec_file,
                 line=dec.line,
+                producedBy=self.PASS_NAME,
+                fromFacts=(dec.id,),
             )
 
         # @patch("module.thing") or @mock.patch("module.thing")
@@ -196,6 +199,8 @@ class MockResolver:
             targetArtifactId=target_artifact_id,
             file=dec_file,
             line=dec.line,
+            producedBy=self.PASS_NAME,
+            fromFacts=(dec.id,),
         )
 
     # -- alias map (same shape as CoverageResolver/FunctionCallResolver) -

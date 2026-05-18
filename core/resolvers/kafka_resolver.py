@@ -44,6 +44,8 @@ class KafkaResolution:
 
 
 class KafkaResolver:
+    PASS_NAME = "kafka_resolver"
+
     def resolve(
         self,
         *,
@@ -66,6 +68,7 @@ class KafkaResolver:
             )
 
         topic_names: set[str] = set()
+        topic_first_fact: dict[str, str] = {}
         producers: list[KafkaProducer] = []
         consumers: list[KafkaConsumer] = []
         seen_producer_ids: set[str] = set()
@@ -87,6 +90,7 @@ class KafkaResolver:
                 if enclosing is None:
                     continue
                 topic_names.add(topic)
+                topic_first_fact.setdefault(topic, call.id)
                 if role == "produce":
                     pid = f"kp:{repo_id}:{call_file}:{call.line}"
                     if pid in seen_producer_ids:
@@ -97,6 +101,7 @@ class KafkaResolver:
                             id=pid, repoId=repo_id,
                             functionArtifactId=enclosing.id, topicName=topic,
                             file=call_file, line=call.line, framework=fw_name,
+                            producedBy=self.PASS_NAME, fromFacts=(call.id,),
                         )
                     )
                 else:  # consume
@@ -109,6 +114,7 @@ class KafkaResolver:
                             id=cid, repoId=repo_id,
                             functionArtifactId=enclosing.id, topicName=topic,
                             file=call_file, line=call.line, framework=fw_name,
+                            producedBy=self.PASS_NAME, fromFacts=(call.id,),
                         )
                     )
                 break  # first matching framework wins
@@ -132,6 +138,7 @@ class KafkaResolver:
                 if enclosing is None:
                     continue
                 topic_names.add(topic)
+                topic_first_fact.setdefault(topic, ann.id)
                 cid = f"kc:{repo_id}:{ann_file}:{ann.line}"
                 if cid in seen_consumer_ids:
                     continue
@@ -141,11 +148,20 @@ class KafkaResolver:
                         id=cid, repoId=repo_id,
                         functionArtifactId=enclosing.id, topicName=topic,
                         file=ann_file, line=ann.line, framework=fw_name,
+                        producedBy=self.PASS_NAME, fromFacts=(ann.id,),
                     )
                 )
                 break
 
-        topics = [KafkaTopic(id=f"topic:{name}", name=name) for name in sorted(topic_names)]
+        topics = [
+            KafkaTopic(
+                id=f"topic:{name}",
+                name=name,
+                producedBy=self.PASS_NAME,
+                fromFacts=(topic_first_fact[name],) if name in topic_first_fact else (),
+            )
+            for name in sorted(topic_names)
+        ]
         return KafkaResolution(topics=topics, producers=producers, consumers=consumers)
 
 

@@ -46,6 +46,8 @@ _SQL_TABLE_RE = re.compile(
 
 
 class QueryResolver:
+    PASS_NAME = "query_resolver"
+
     def resolve(
         self,
         *,
@@ -82,7 +84,7 @@ class QueryResolver:
             query = _build_query_from_fact(
                 fact=call, pattern=matched_pattern, repo_id=repo_id,
                 repo_root=repo_root, by_file_ranges=by_file_ranges,
-                id_prefix="q",
+                id_prefix="q", produced_by=self.PASS_NAME,
             )
             if query is None or query.id in seen_ids:
                 continue
@@ -100,7 +102,7 @@ class QueryResolver:
             query = _build_query_from_fact(
                 fact=ann, pattern=matched_pattern, repo_id=repo_id,
                 repo_root=repo_root, by_file_ranges=by_file_ranges,
-                id_prefix="q",
+                id_prefix="q", produced_by=self.PASS_NAME,
             )
             if query is None or query.id in seen_ids:
                 continue
@@ -140,6 +142,7 @@ def _build_query_from_fact(
     repo_root: str | None,
     by_file_ranges: dict[str, list[tuple[int, int, CodeArtifact]]],
     id_prefix: str,
+    produced_by: str = "",
 ) -> Query | None:
     args = fact.data.get("args") or []
     arg_idx = pattern.expression_arg
@@ -163,6 +166,8 @@ def _build_query_from_fact(
         expression=expr,
         tables=tables,
         enclosingArtifactId=enclosing.id if enclosing else None,
+        producedBy=produced_by,
+        fromFacts=(fact.id,),
     )
 
 

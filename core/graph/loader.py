@@ -377,6 +377,8 @@ def _service_props(s: Service) -> dict[str, Any]:
         "created_at": s.created_at.isoformat(),
         "last_updated_at": s.last_updated_at.isoformat(),
         "is_active": s.is_active,
+        "produced_by": s.produced_by,
+        "from_facts": list(s.from_facts),
     }
 
 
@@ -391,6 +393,8 @@ def _artifact_props(a: CodeArtifact) -> dict[str, Any]:
         "line_end": a.line_range.end,
         "is_public": a.is_public,
         "version": a.version or "",
+        "produced_by": a.produced_by,
+        "from_facts": list(a.from_facts),
     }
 
 
@@ -407,6 +411,8 @@ def _test_props(t: TestCase) -> dict[str, Any]:
         "flakiness_score": t.flakiness_score,
         "priority": t.priority,
         "affected_repos": list(t.affected_repos),
+        "produced_by": t.produced_by,
+        "from_facts": list(t.from_facts),
     }
 
 
@@ -426,6 +432,8 @@ def _connection_props(c: ExternalConnection) -> dict[str, Any]:
         "data_flow_json": json.dumps(c.data_flow, sort_keys=True),
         "discovered_at": c.discovered_at.isoformat(),
         "last_observed_at": c.last_observed_at.isoformat(),
+        "produced_by": c.produced_by,
+        "from_facts": list(c.from_facts),
     }
 
 
@@ -439,6 +447,8 @@ def _endpoint_props(e: Endpoint) -> dict[str, Any]:
         "handler_file": e.handler_file,
         "handler_symbol": e.handler_symbol,
         "is_public": e.is_public,
+        "produced_by": e.produced_by,
+        "from_facts": list(e.from_facts),
     }
 
 
@@ -458,6 +468,8 @@ def _data_model_props(d: DataModel) -> dict[str, Any]:
         "field_types": field_types,
         "table_name": d.table_name,
         "is_public": d.is_public,
+        "produced_by": d.produced_by,
+        "from_facts": list(d.from_facts),
     }
 
 
@@ -470,11 +482,18 @@ def _query_props(q: Query) -> dict[str, Any]:
         "line": q.line,
         "expression": q.expression,
         "tables": list(q.tables),
+        "produced_by": q.produced_by,
+        "from_facts": list(q.from_facts),
     }
 
 
 def _kafka_topic_props(t: KafkaTopic) -> dict[str, Any]:
-    return {"id": t.id, "name": t.name}
+    return {
+        "id": t.id,
+        "name": t.name,
+        "produced_by": t.produced_by,
+        "from_facts": list(t.from_facts),
+    }
 
 
 def _kafka_producer_props(p: KafkaProducer) -> dict[str, Any]:
@@ -486,6 +505,8 @@ def _kafka_producer_props(p: KafkaProducer) -> dict[str, Any]:
         "file": p.file,
         "line": p.line,
         "framework": p.framework,
+        "produced_by": p.produced_by,
+        "from_facts": list(p.from_facts),
     }
 
 
@@ -499,6 +520,8 @@ def _kafka_consumer_props(c: KafkaConsumer) -> dict[str, Any]:
         "line": c.line,
         "framework": c.framework,
         "consumer_group": c.consumer_group,
+        "produced_by": c.produced_by,
+        "from_facts": list(c.from_facts),
     }
 
 
@@ -512,6 +535,8 @@ def _mock_props(m: Mock) -> dict[str, Any]:
         "target_artifact_id": m.target_artifact_id or "",
         "file": m.file,
         "line": m.line,
+        "produced_by": m.produced_by,
+        "from_facts": list(m.from_facts),
     }
 
 

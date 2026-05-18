@@ -188,3 +188,164 @@ def test_duplicate_call_pairs_deduped() -> None:
     out = FunctionCallResolver().resolve(tree=tree, artifacts=[caller, callee])
     assert out.artifacts[0].calls == (callee.id,)
     assert len(out.edges) == 1
+
+
+# ---- helpers for the typed-receiver tests below ---------------------------
+
+
+def _method(
+    name: str,
+    *,
+    cls: str,
+    file: str,
+    start: int,
+    end: int,
+    repo: str = "r",
+) -> CodeArtifact:
+    return CodeArtifact(
+        id=f"method:{repo}:{file}:{cls}.{name}",
+        repoId=repo,
+        type="method",
+        name=name,
+        file=file,
+        lineRange=LineRange(start=start, end=end),
+        isPublic=True,
+    )
+
+
+def _symbol_method(
+    *,
+    name: str,
+    cls: str,
+    file: str,
+    line: int,
+    params: list[tuple[str, str]] | None = None,
+    repo: str = "r",
+) -> Fact:
+    return Fact(
+        kind=FactKind.SYMBOL,
+        file=file,
+        line=line,
+        line_end=line + 1,
+        repo_id=repo,
+        data={
+            "sym_kind": "method",
+            "name": name,
+            "is_async": False,
+            "enclosing_class": cls,
+            "references": [],
+            "params": list(params or []),
+        },
+    )
+
+
+def _symbol_fn(
+    *,
+    name: str,
+    file: str,
+    line: int,
+    params: list[tuple[str, str]] | None = None,
+    repo: str = "r",
+) -> Fact:
+    return Fact(
+        kind=FactKind.SYMBOL,
+        file=file,
+        line=line,
+        line_end=line + 1,
+        repo_id=repo,
+        data={
+            "sym_kind": "function",
+            "name": name,
+            "is_async": False,
+            "enclosing_class": "",
+            "references": [],
+            "params": list(params or []),
+        },
+    )
+
+
+def test_self_dotted_call_resolves_to_sibling_method() -> None:
+    """A method calling `self.helper()` should link to the sibling method
+    on the same class — the data is in `enclosing_class`, the resolver just
+    needs to consult it."""
+    file = "src/svc.py"
+    caller = _method("do", cls="Svc", file=file, start=1, end=5)
+    callee = _method("helper", cls="Svc", file=file, start=10, end=12)
+    tree = FactTree.from_facts(
+        "r",
+        [
+            _symbol_method(name="do", cls="Svc", file=file, line=1),
+            _symbol_method(name="helper", cls="Svc", file=file, line=10),
+            _call(file, line=3, callee="self.helper"),
+        ],
+    )
+    out = FunctionCallResolver().resolve(tree=tree, artifacts=[caller, callee])
+    by_name = {a.name: a for a in out.artifacts}
+    assert by_name["do"].calls == (callee.id,)
+
+
+def test_self_call_does_not_cross_classes() -> None:
+    """`self.x()` from a method on A must not bind to a method named `x` on B."""
+    file = "src/svc.py"
+    a_do = _method("do", cls="A", file=file, start=1, end=5)
+    b_x = _method("x", cls="B", file=file, start=20, end=22)
+    tree = FactTree.from_facts(
+        "r",
+        [
+            _symbol_method(name="do", cls="A", file=file, line=1),
+            _symbol_method(name="x", cls="B", file=file, line=20),
+            _call(file, line=3, callee="self.x"),
+        ],
+    )
+    out = FunctionCallResolver().resolve(tree=tree, artifacts=[a_do, b_x])
+    by_name = {a.name: a for a in out.artifacts}
+    assert by_name["do"].calls == ()
+
+
+def test_typed_parameter_resolves_to_class_method() -> None:
+    """The FastAPI Depends pattern: `service: Svc` parameter, then
+    `service.foo()` resolves to `Svc.foo` via the param's annotation."""
+    router_file = "src/routers/users.py"
+    svc_file = "src/services/svc.py"
+    caller = _fn("get_user", file=router_file, start=5, end=10)
+    callee = _method("foo", cls="Svc", file=svc_file, start=2, end=4)
+    tree = FactTree.from_facts(
+        "r",
+        [
+            _import_from(router_file, "src.services.svc", ["Svc"]),
+            _symbol_fn(
+                name="get_user",
+                file=router_file,
+                line=5,
+                params=[("id", "int"), ("service", "Svc")],
+            ),
+            _symbol_method(name="foo", cls="Svc", file=svc_file, line=2),
+            _call(router_file, line=7, callee="service.foo"),
+        ],
+    )
+    out = FunctionCallResolver().resolve(tree=tree, artifacts=[caller, callee])
+    by_name = {a.name: a for a in out.artifacts}
+    assert by_name["get_user"].calls == (callee.id,)
+
+
+def test_typed_parameter_without_annotation_does_not_resolve() -> None:
+    """Untyped local receivers stay unresolved — that's the bound on this
+    fix and we want a failing case to lock it in."""
+    file = "src/app.py"
+    caller = _fn("handler", file=file, start=1, end=5)
+    other = _method("foo", cls="Svc", file="src/svc.py", start=10, end=12)
+    tree = FactTree.from_facts(
+        "r",
+        [
+            _symbol_fn(
+                name="handler",
+                file=file,
+                line=1,
+                params=[("service", "")],  # no annotation
+            ),
+            _symbol_method(name="foo", cls="Svc", file="src/svc.py", line=10),
+            _call(file, line=3, callee="service.foo"),
+        ],
+    )
+    out = FunctionCallResolver().resolve(tree=tree, artifacts=[caller, other])
+    assert out.artifacts[0].calls == ()

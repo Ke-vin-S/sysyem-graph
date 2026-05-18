@@ -38,6 +38,8 @@ class DataModelResolution:
 
 
 class DataModelResolver:
+    PASS_NAME = "data_model_resolver"
+
     def resolve(
         self,
         *,
@@ -101,6 +103,7 @@ class DataModelResolver:
                     name=name,
                     kind=dm.kind,
                     repo_root=repo_root,
+                    produced_by=self.PASS_NAME,
                 )
                 if model.id in seen_ids:
                     continue
@@ -146,7 +149,13 @@ def _matches(
 
 
 def _build_data_model(
-    *, repo_id: str, class_fact: Fact, name: str, kind: str, repo_root: str | None = None
+    *,
+    repo_id: str,
+    class_fact: Fact,
+    name: str,
+    kind: str,
+    repo_root: str | None = None,
+    produced_by: str = "",
 ) -> DataModel:
     start = class_fact.line
     end = class_fact.line_end or start
@@ -158,6 +167,8 @@ def _build_data_model(
         file=file,
         lineRange=LineRange(start=start, end=end),
         kind=_normalize_kind(kind),
+        producedBy=produced_by,
+        fromFacts=(class_fact.id,),
     )
 
 

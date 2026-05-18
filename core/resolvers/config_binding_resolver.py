@@ -66,6 +66,8 @@ _INTERESTING_KEY_HINTS = (
 
 
 class ConfigBindingResolver:
+    PASS_NAME = "config_binding_resolver"
+
     def resolve(
         self,
         *,
@@ -103,6 +105,8 @@ class ConfigBindingResolver:
                     dataFlow={"source": "config", "config_key": key, "config_file": fact.file},
                     discoveredAt=when,
                     lastObservedAt=when,
+                    producedBy=self.PASS_NAME,
+                    fromFacts=(fact.id,),
                 )
             )
         return ConfigBindingResolution(connections=connections)

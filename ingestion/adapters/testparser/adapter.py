@@ -172,6 +172,8 @@ class TestParserAdapter(IngestionAdapter):
                     handlerFile=handler_rel,
                     handlerSymbol=endpoint.handler_symbol,
                     isPublic=True,
+                    producedBy="endpoint_resolver",
+                    fromFacts=endpoint.derivation,
                 )
             )
         result.endpoints.extend(endpoints)
@@ -258,6 +260,7 @@ class TestParserAdapter(IngestionAdapter):
             createdAt=now,
             lastUpdatedAt=now,
             isActive=True,
+            producedBy="testparser_adapter",
         )
 
     def _infer_language(self, tree: FactTree) -> str:

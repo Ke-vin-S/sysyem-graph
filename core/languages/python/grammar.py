@@ -115,6 +115,10 @@ class PythonGrammar(Grammar):
                 # "actually touched by this function" — kills file-scoped
                 # over-coverage. Bounded and cheap: typically < 50 per fn.
                 references = sorted(_collect_referenced_names(child))
+                # Param (name, type-hint) pairs. FunctionCallResolver uses
+                # these to resolve `param.method()` calls where `param` is
+                # a typed argument (the FastAPI Depends pattern).
+                params = _collect_params(child)
                 facts.append(
                     Fact(
                         kind=FactKind.SYMBOL,
@@ -128,6 +132,7 @@ class PythonGrammar(Grammar):
                             "is_async": isinstance(child, ast.AsyncFunctionDef),
                             "enclosing_class": enclosing_class or "",
                             "references": references,
+                            "params": params,
                         },
                     )
                 )
@@ -176,6 +181,26 @@ class PythonGrammar(Grammar):
                     },
                 )
             )
+
+
+def _collect_params(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[tuple[str, str]]:
+    """Return (param_name, type_hint) tuples for every positional and
+    keyword-only argument of `func`.
+
+    `type_hint` is the dotted name of the annotation (`Session`,
+    `app.services.UserService`) when one is present, otherwise "". Complex
+    annotations the grammar can't unwrap to a name (`Optional[X]`,
+    `list[Foo]`, callables) come back as "" — the resolver treats those
+    as "no usable type". Star-args and `**kwargs` are skipped.
+    """
+    out: list[tuple[str, str]] = []
+    args = func.args
+    for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+        type_hint = _qualified_name(arg.annotation) if arg.annotation is not None else ""
+        out.append((arg.arg, type_hint))
+    return out
 
 
 def _collect_referenced_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:

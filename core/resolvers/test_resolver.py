@@ -31,6 +31,8 @@ class ResolvedTest:
 
 
 class TestResolver:
+    PASS_NAME = "test_resolver"
+
     def resolve(self, context: ResolverContext) -> list[TestCase]:
         # Build a per-language merged view: function name prefixes, decorator
         # callees, integration/e2e markers, mock annotations, external modules.
@@ -81,6 +83,8 @@ class TestResolver:
                 flakiness_score=0.0,
                 priority="HIGH" if test_type is TestType.INTEGRATION else "MEDIUM",
                 affectedRepos=(context.repo_id,),
+                producedBy=self.PASS_NAME,
+                fromFacts=(symbol.id,),
             )
             results.append(test)
         return results
