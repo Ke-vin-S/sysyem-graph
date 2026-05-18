@@ -45,6 +45,15 @@ class WalkerConfig:
         "target",
         "out",
         ".system-graph",
+        # Conventional caches + Neo4j local data dirs that pollute self-scans.
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        "htmlcov",
+        "neo4j-data",
+        "neo4j-import",
+        "neo4j-logs",
+        "neo4j-plugins",
     )
     max_file_bytes: int = 1_000_000
     """Skip files larger than this — defends against committed binaries."""
