@@ -16,7 +16,20 @@ from core.graph.client import Neo4jClient, Neo4jUnavailable
 from core.graph.loader import GraphLoader
 from core.graph.migrations import Migrator
 from core.graph.queries import GraphQueries
-from core.types import CodeArtifact, ExternalConnection, Service, TestCase
+from core.types import (
+    CodeArtifact,
+    DataModel,
+    Endpoint,
+    ExternalConnection,
+    KafkaConsumer,
+    KafkaProducer,
+    KafkaTopic,
+    Mock,
+    Query,
+    Service,
+    Suggestion,
+    TestCase,
+)
 
 app = typer.Typer(help="system-graph Neo4j control plane")
 logger = logging.getLogger(__name__)
@@ -139,29 +152,28 @@ def _require_neo4j(client: Neo4jClient) -> None:
 
 
 def _read_merged(directory: Path) -> MergedResult:
-    services_path = directory / "services.json"
-    artifacts_path = directory / "artifacts.json"
-    tests_path = directory / "tests.json"
-    connections_path = directory / "connections.json"
-
     merged = MergedResult()
-    if services_path.exists():
-        for row in json.loads(services_path.read_text()):
-            svc = Service.model_validate(row)
-            merged.services[svc.id] = svc
-    if artifacts_path.exists():
-        for row in json.loads(artifacts_path.read_text()):
-            art = CodeArtifact.model_validate(row)
-            merged.artifacts[art.id] = art
-    if tests_path.exists():
-        for row in json.loads(tests_path.read_text()):
-            t = TestCase.model_validate(row)
-            merged.tests[t.id] = t
-    if connections_path.exists():
-        for row in json.loads(connections_path.read_text()):
-            c = ExternalConnection.model_validate(row)
-            merged.connections[c.id] = c
+    _load_into(merged.services, directory / "services.json", Service)
+    _load_into(merged.connections, directory / "connections.json", ExternalConnection)
+    _load_into(merged.artifacts, directory / "artifacts.json", CodeArtifact)
+    _load_into(merged.tests, directory / "tests.json", TestCase)
+    _load_into(merged.endpoints, directory / "endpoints.json", Endpoint)
+    _load_into(merged.data_models, directory / "data_models.json", DataModel)
+    _load_into(merged.queries, directory / "queries.json", Query)
+    _load_into(merged.kafka_topics, directory / "kafka_topics.json", KafkaTopic)
+    _load_into(merged.kafka_producers, directory / "kafka_producers.json", KafkaProducer)
+    _load_into(merged.kafka_consumers, directory / "kafka_consumers.json", KafkaConsumer)
+    _load_into(merged.mocks, directory / "mocks.json", Mock)
+    _load_into(merged.suggestions, directory / "suggestions.json", Suggestion)
     return merged
+
+
+def _load_into(bucket: dict, path: Path, model) -> None:
+    if not path.exists():
+        return
+    for row in json.loads(path.read_text()):
+        item = model.model_validate(row)
+        bucket[item.id] = item
 
 
 if __name__ == "__main__":  # pragma: no cover

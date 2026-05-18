@@ -1,0 +1,21 @@
+name: spring_kafka
+language: java
+detectors:
+  - any_import_starts_with:
+      - "org.springframework.kafka"
+
+kafka:
+  produce_methods:
+    - send
+  produce_callees:
+    - KafkaTemplate.send
+  consume_annotations:
+    - KafkaListener
+  topic_arg: 0
+  topic_kwarg: topics
+
+notes: |
+  Spring Kafka. Producers: `kafkaTemplate.send("topic", payload)`.
+  Consumers: methods annotated `@KafkaListener(topics = "topic")`. The
+  topic kwarg name is `topics` in Spring's annotation API; positional
+  arg position is 0 for the producer call.

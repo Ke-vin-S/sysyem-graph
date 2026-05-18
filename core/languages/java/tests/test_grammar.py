@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.facts import FactKind
-from ingestion.grammars import JavaGrammar
+from core.languages.java.grammar import JavaGrammar
 
 CONTROLLER = """\
 package com.example;

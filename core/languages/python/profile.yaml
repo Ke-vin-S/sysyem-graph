@@ -1,0 +1,32 @@
+name: python
+file_extensions: [".py"]
+
+grammar:
+  kind: native
+  driver: core.languages.python.grammar.PythonGrammar
+
+module_resolution:
+  separator: "."
+  candidate_path_templates:
+    - "{module}.py"
+    - "{module}/__init__.py"
+
+package_aggregator:
+  # Python's re-export idiom: package-level __init__.py imports from
+  # sibling submodules. CoverageResolver follows these to map
+  # `from core.resolvers import EndpointResolver` to the real defining file.
+  files: ["__init__.py"]
+
+visibility:
+  rule: leading_underscore_is_private
+
+test_paths:
+  function_name_prefixes: ["test_"]
+  glob_patterns:
+    - "**/test_*.py"
+    - "**/*_test.py"
+    - "**/tests/**"
+
+notes: |
+  Standard Python conventions. `import x.y` resolves to `x/y.py` or
+  `x/y/__init__.py`. Names with a leading underscore are treated as private.

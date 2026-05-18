@@ -10,7 +10,14 @@ from typing import Any
 from core.types import (
     Change,
     CodeArtifact,
+    DataModel,
+    Endpoint,
     ExternalConnection,
+    KafkaConsumer,
+    KafkaProducer,
+    KafkaTopic,
+    Mock,
+    Query,
     Service,
     TestCase,
 )
@@ -65,6 +72,13 @@ class AdapterResult:
     services: list[Service] = field(default_factory=list)
     connections: list[ExternalConnection] = field(default_factory=list)
     artifacts: list[CodeArtifact] = field(default_factory=list)
+    endpoints: list[Endpoint] = field(default_factory=list)
+    data_models: list[DataModel] = field(default_factory=list)
+    queries: list[Query] = field(default_factory=list)
+    kafka_topics: list[KafkaTopic] = field(default_factory=list)
+    kafka_producers: list[KafkaProducer] = field(default_factory=list)
+    kafka_consumers: list[KafkaConsumer] = field(default_factory=list)
+    mocks: list[Mock] = field(default_factory=list)
     tests: list[TestCase] = field(default_factory=list)
     changes: list[Change] = field(default_factory=list)
     coverage: Coverage = field(default_factory=Coverage)
@@ -73,13 +87,33 @@ class AdapterResult:
     finished_at: datetime | None = None
 
     def is_empty(self) -> bool:
-        return not (self.services or self.connections or self.artifacts or self.tests or self.changes)
+        return not (
+            self.services
+            or self.connections
+            or self.artifacts
+            or self.endpoints
+            or self.data_models
+            or self.queries
+            or self.kafka_topics
+            or self.kafka_producers
+            or self.kafka_consumers
+            or self.mocks
+            or self.tests
+            or self.changes
+        )
 
     def counts(self) -> dict[str, int]:
         return {
             "services": len(self.services),
             "connections": len(self.connections),
             "artifacts": len(self.artifacts),
+            "endpoints": len(self.endpoints),
+            "data_models": len(self.data_models),
+            "queries": len(self.queries),
+            "kafka_topics": len(self.kafka_topics),
+            "kafka_producers": len(self.kafka_producers),
+            "kafka_consumers": len(self.kafka_consumers),
+            "mocks": len(self.mocks),
             "tests": len(self.tests),
             "changes": len(self.changes),
         }

@@ -1,0 +1,48 @@
+name: python
+language: python
+detectors:
+  - any_file_glob: ["*.py", "**/*.py"]
+
+# Language-level test naming + paths (test_* prefix, tests/ globs) live in
+# `core/languages/python/profile.yaml`. Framework YAMLs only carry
+# framework-specific bits — mocks, http clients, integration markers, etc.
+
+tests:
+  decorator_callees: []
+data_models:
+  kind: dataclass
+  base_class_suffixes: []
+  decorator_callees:
+    - dataclass
+    - dataclasses.dataclass
+mocks:
+  decorator_callees:
+    - "patch"
+    - "patch.object"
+    - "patch.multiple"
+    - "mock.patch"
+  with_callees:
+    - "patch"
+    - "mock.patch"
+  mock_call_signatures: ["Mock", "MagicMock"]
+http_clients:
+  external_modules:
+    - requests
+    - httpx
+    - aiohttp
+    - urllib
+    - urllib3
+    - psycopg2
+    - psycopg
+    - sqlalchemy
+    - redis
+    - boto3
+    - kafka
+    - confluent_kafka
+    - pymongo
+    - neo4j
+    - grpc
+notes: |
+  Python framework knowledge: unittest.mock patterns and common HTTP/DB
+  client libraries that signal integration tests. Language-level conventions
+  (test_* naming, tests/ paths) come from core/languages/python/profile.yaml.

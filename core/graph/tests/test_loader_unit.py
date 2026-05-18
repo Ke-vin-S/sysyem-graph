@@ -134,8 +134,11 @@ def test_load_emits_contains_edges_for_artifacts() -> None:
     )
     GraphLoader(client).load(merged)
     contains_stmts = [
-        s for s in client.session_obj.statements if "[:CONTAINS]" in s.cypher
+        s for s in client.session_obj.statements if ":CONTAINS]" in s.cypher
     ]
+    # CONTAINS now spans CodeArtifact + Endpoint + DataModel + Query buckets;
+    # the only one with rows in this fixture is CodeArtifact.
+    contains_stmts = [s for s in contains_stmts if s.params.get("batch")]
     assert len(contains_stmts) == 1
     rows = contains_stmts[0].params["batch"]
     assert {"art-1", "art-2"} == {r["dst"] for r in rows}
@@ -153,7 +156,7 @@ def test_load_emits_covers_edges_one_per_artifact_id() -> None:
     stats = GraphLoader(client).load(merged)
     assert stats.edges["COVERS"] == 3
     covers_stmts = [
-        s for s in client.session_obj.statements if "[:COVERS]" in s.cypher
+        s for s in client.session_obj.statements if ":COVERS]" in s.cypher
     ]
     assert len(covers_stmts) == 1
     assert len(covers_stmts[0].params["batch"]) == 3

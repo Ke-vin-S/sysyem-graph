@@ -145,6 +145,11 @@ class CodeArtifact(_Frozen):
     external_connections: tuple[str, ...] = Field(default_factory=tuple, alias="externalConnections")
     """IDs of ExternalConnections this artifact exposes or calls."""
 
+    calls: tuple[str, ...] = Field(default_factory=tuple)
+    """IDs of CodeArtifacts this function/method invokes. Populated by
+    FunctionCallResolver. Materialized as (CodeArtifact)-[:CALLS]->(CodeArtifact)
+    edges in Neo4j."""
+
 
 class TestCase(_Frozen):
     """A single test case identified in a repo.

@@ -110,6 +110,11 @@ class PythonGrammar(Grammar):
             elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 line_end = getattr(child, "end_lineno", child.lineno) or child.lineno
                 sym_kind = "method" if enclosing_class else "function"
+                # Names referenced inside the body (`ast.Name` with Load ctx).
+                # Used by CoverageResolver to distinguish "imported" from
+                # "actually touched by this function" — kills file-scoped
+                # over-coverage. Bounded and cheap: typically < 50 per fn.
+                references = sorted(_collect_referenced_names(child))
                 facts.append(
                     Fact(
                         kind=FactKind.SYMBOL,
@@ -122,6 +127,7 @@ class PythonGrammar(Grammar):
                             "name": child.name,
                             "is_async": isinstance(child, ast.AsyncFunctionDef),
                             "enclosing_class": enclosing_class or "",
+                            "references": references,
                         },
                     )
                 )
@@ -170,6 +176,23 @@ class PythonGrammar(Grammar):
                     },
                 )
             )
+
+
+def _collect_referenced_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Return every `ast.Name` identifier used in Load context inside `func`'s
+    body (and any nested defs). Used by CoverageResolver to tell whether a
+    test actually touches a name it imported.
+
+    We skip arguments and the function's own name (those are bindings, not
+    references). We include attribute *receivers* (`foo` in `foo.bar`) and
+    direct calls (`foo(...)`) since both signal that the imported symbol is
+    touched.
+    """
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            names.add(node.id)
+    return names
 
 
 def _decorator_fact(

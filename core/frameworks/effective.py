@@ -9,9 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from core.frameworks.definition import (
+    DataModelPatterns,
     FrameworkDefinition,
     HttpClientPatterns,
+    KafkaPatterns,
     MockPatterns,
+    QueryPatterns,
     TestPatterns,
 )
 from core.frameworks.overlay import RepoOverlay
@@ -29,6 +32,9 @@ class EffectiveFramework:
     tests: TestPatterns | None
     mocks: MockPatterns | None
     http_clients: HttpClientPatterns | None
+    data_models: DataModelPatterns | None = None
+    queries: QueryPatterns | None = None
+    kafka: KafkaPatterns | None = None
 
 
 def compose(definition: FrameworkDefinition, overlay: RepoOverlay | None) -> EffectiveFramework:
@@ -40,6 +46,9 @@ def compose(definition: FrameworkDefinition, overlay: RepoOverlay | None) -> Eff
             tests=definition.tests,
             mocks=definition.mocks,
             http_clients=definition.http_clients,
+            data_models=definition.data_models,
+            queries=definition.queries,
+            kafka=definition.kafka,
         )
 
     tests = definition.tests
@@ -80,4 +89,7 @@ def compose(definition: FrameworkDefinition, overlay: RepoOverlay | None) -> Eff
         tests=tests,
         mocks=mocks,
         http_clients=http_clients,
+        data_models=definition.data_models,
+        queries=definition.queries,
+        kafka=definition.kafka,
     )

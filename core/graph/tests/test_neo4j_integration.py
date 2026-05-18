@@ -19,6 +19,7 @@ from core.graph import (
     Migrator,
     Neo4jClient,
 )
+from core.graph.migrations.migrator import MIGRATIONS
 from core.types import (
     CodeArtifact,
     Direction,
@@ -102,10 +103,11 @@ def test_migrator_idempotent(client: Neo4jClient) -> None:
     """Running apply_pending twice does no extra work the second time."""
     first = Migrator().apply_pending(client)
     second = Migrator().apply_pending(client)
-    assert second.summary().startswith("0 applied") or "1 applied" in second.summary()
-    # _SchemaMigration node count is exactly 1 (the v1 migration).
+    # v1 always re-runs (idempotent bootstrap); higher versions are skipped.
+    assert second.summary().startswith("1 applied")
+    # One _SchemaMigration node per declared migration version (v1, v2, ...).
     rows = client.run("MATCH (m:_SchemaMigration) RETURN count(m) AS c")
-    assert rows[0]["c"] == 1
+    assert rows[0]["c"] == len(MIGRATIONS)
     _ = first  # silence unused
 
 

@@ -1,0 +1,23 @@
+name: mockito
+language: java
+detectors:
+  - any_import_starts_with:
+      - "org.mockito"
+      - "org.springframework.boot.test.mock"
+
+mocks:
+  field_annotations:
+    - Mock
+    - MockBean
+    - Spy
+    - InjectMocks
+  mock_call_signatures:
+    - mock
+    - spy
+
+notes: |
+  Mockito + Spring Boot's @MockBean field annotations. Field-level mocks
+  attach to a test class; the current MockResolver handles function-level
+  decorators (Python). Field-level Mock records land in a follow-up
+  resolver pass — schema is ready (Mock node carries kind=patch_object,
+  but `kind: patch_field` would be a cleaner enum addition).

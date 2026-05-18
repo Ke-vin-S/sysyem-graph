@@ -12,6 +12,12 @@ routes:
     - "DeleteMapping"
     - "PatchMapping"
     - "RequestMapping"
+  annotation_method_map:
+    GetMapping: get
+    PostMapping: post
+    PutMapping: put
+    DeleteMapping: delete
+    PatchMapping: patch
   base_path_sources:
     - config_key: "server.servlet.context-path"
     - config_key: "spring.mvc.servlet.path"

@@ -28,32 +28,24 @@ from core.facts import FactKind, FactTree
 from core.frameworks import compose, detect_frameworks, load_library
 from core.frameworks.library import DEFAULT_FRAMEWORKS_DIR, FrameworkLibrary
 from core.resolvers import (
+    ConfigBindingResolver,
     CoverageResolver,
+    DataModelResolver,
     EndpointResolver,
+    FunctionCallResolver,
     FunctionResolver,
+    KafkaResolver,
+    MockResolver,
+    QueryResolver,
     ResolverContext,
     TestResolver,
 )
-from core.types import CodeArtifact, LineRange, Service, TestCase
+from core.types import CodeArtifact, Endpoint, LineRange, Service, TestCase
 from core.types.errors import IngestionError
 from core.walker import Walker
 from ingestion.adapters.testparser.config import TestParserAdapterConfig
 
 logger = logging.getLogger(__name__)
-
-
-# Map file-suffix → coarse language name. Used only to set Service.language.
-_LANG_BY_SUFFIX: dict[str, str] = {
-    ".py": "python",
-    ".java": "java",
-    ".go": "go",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".js": "javascript",
-    ".kt": "kotlin",
-    ".rb": "ruby",
-    ".rs": "rust",
-}
 
 
 class TestParserAdapter(IngestionAdapter):
@@ -70,16 +62,44 @@ class TestParserAdapter(IngestionAdapter):
         test_resolver: TestResolver | None = None,
         function_resolver: FunctionResolver | None = None,
         endpoint_resolver: EndpointResolver | None = None,
+        function_call_resolver: FunctionCallResolver | None = None,
+        mock_resolver: MockResolver | None = None,
+        data_model_resolver: DataModelResolver | None = None,
+        query_resolver: QueryResolver | None = None,
+        kafka_resolver: KafkaResolver | None = None,
+        config_binding_resolver: ConfigBindingResolver | None = None,
         coverage_resolver: CoverageResolver | None = None,
         library: FrameworkLibrary | None = None,
+        languages: object | None = None,
     ) -> None:
+        from core.languages import load_library as _load_languages
+
         self._config = config
         self._walker = walker or Walker()
         self._test_resolver = test_resolver or TestResolver()
         self._function_resolver = function_resolver or FunctionResolver()
         self._endpoint_resolver = endpoint_resolver or EndpointResolver()
+        self._function_call_resolver = function_call_resolver or FunctionCallResolver()
+        self._mock_resolver = mock_resolver or MockResolver()
+        self._data_model_resolver = data_model_resolver or DataModelResolver()
+        self._query_resolver = query_resolver or QueryResolver()
+        self._kafka_resolver = kafka_resolver or KafkaResolver()
+        self._config_binding_resolver = (
+            config_binding_resolver or ConfigBindingResolver()
+        )
         self._coverage_resolver = coverage_resolver or CoverageResolver()
         self._library = library or load_library(DEFAULT_FRAMEWORKS_DIR)
+        # Lazy default: load core/languages/<lang>/profile.yaml once;
+        # tests/temp dirs without the directory fall through with an empty
+        # library and the resolver uses its Python fallback.
+        if languages is None:
+            try:
+                languages = _load_languages()
+            except Exception:
+                from core.languages import LanguageLibrary
+
+                languages = LanguageLibrary()
+        self._languages = languages
 
     def extract(self, context: IngestionContext) -> AdapterResult:
         result = AdapterResult(adapter=self.name)
@@ -108,7 +128,9 @@ class TestParserAdapter(IngestionAdapter):
         tree = self._walker.walk(repo_dir, repo_id=repo_id)
         detected = detect_frameworks(tree, self._library)
         effective = tuple(compose(fw, None) for fw in detected)
-        ctx = ResolverContext(tree=tree, frameworks=effective, repo_id=repo_id)
+        ctx = ResolverContext(
+            tree=tree, frameworks=effective, repo_id=repo_id, languages=self._languages
+        )
 
         # 1. Service node for this repo. Language is the majority extension.
         service = self._build_service(repo_dir, tree, detected, context.now)
@@ -120,35 +142,102 @@ class TestParserAdapter(IngestionAdapter):
             self._rebase(artifact, repo_root_abs) for artifact in self._function_resolver.resolve(ctx)
         ]
 
-        # 3. Endpoint artifacts.
-        endpoint_artifacts: list[CodeArtifact] = []
+        # 2b. Resolve function→function calls. The resolver returns updated
+        #     artifacts with `calls` populated; we feed those forward.
+        call_resolution = self._function_call_resolver.resolve(
+            tree=tree,
+            artifacts=function_artifacts,
+            repo_root=repo_root_abs,
+            languages=self._languages,
+        )
+        function_artifacts = call_resolution.artifacts
+        result.artifacts.extend(function_artifacts)
+
+        # 3. Endpoint records — now a first-class node type. We look up the
+        #    handler function artifact by (file, name) so the loader can wire
+        #    the (Endpoint)-[:HANDLED_BY]->(CodeArtifact) edge.
+        handler_index = {(a.file, a.name): a.id for a in function_artifacts}
+        endpoints: list[Endpoint] = []
         for endpoint in self._endpoint_resolver.resolve(ctx):
             handler_rel = _make_relative(endpoint.handler_file, repo_root_abs)
-            endpoint_artifacts.append(
-                CodeArtifact(
+            handler_artifact_id = handler_index.get((handler_rel, endpoint.handler_symbol))
+            endpoints.append(
+                Endpoint(
                     id=f"endpoint:{repo_id}:{endpoint.method}:{endpoint.full_path}",
                     repoId=repo_id,
-                    type="endpoint",
-                    name=f"{endpoint.method} {endpoint.full_path}",
-                    file=handler_rel,
-                    lineRange=LineRange(start=1, end=1),
+                    method=endpoint.method,
+                    path=endpoint.full_path,
+                    framework=endpoint.framework or "unknown",
+                    handlerArtifactId=handler_artifact_id,
+                    handlerFile=handler_rel,
+                    handlerSymbol=endpoint.handler_symbol,
                     isPublic=True,
                 )
             )
-
-        artifacts = function_artifacts + endpoint_artifacts
-        result.artifacts.extend(artifacts)
+        result.endpoints.extend(endpoints)
 
         # 4. Tests.
         tests = self._test_resolver.resolve(ctx)
         # Rewrite test file paths to repo-relative for stable IDs across runs.
         tests = [self._rebase_test(t, repo_root_abs, repo_id) for t in tests]
 
-        # 5. Coverage edges — link tests to artifacts via the test file's imports.
+        # 5. Coverage edges — link tests to function artifacts via the test
+        #    file's imports. Endpoints are excluded by design: tests import
+        #    handler functions by name, not URL paths.
         coverage = self._coverage_resolver.resolve(
-            tree=tree, tests=tests, artifacts=artifacts, repo_root=repo_root_abs
+            tree=tree,
+            tests=tests,
+            artifacts=function_artifacts,
+            repo_root=repo_root_abs,
+            languages=self._languages,
         )
         result.tests.extend(coverage.tests)
+
+        # 6. Mocks — turn @patch / @patch.object decorators into Mock records,
+        #    resolving target strings against the function artifact index.
+        mock_resolution = self._mock_resolver.resolve(
+            tree=tree,
+            tests=coverage.tests,
+            artifacts=function_artifacts,
+            frameworks=effective,
+            repo_id=repo_id,
+            repo_root=repo_root_abs,
+            languages=self._languages,
+        )
+        result.mocks.extend(mock_resolution.mocks)
+
+        # 7. Data models — pydantic / sqlalchemy / dataclass classes, driven
+        #    by per-framework data_models YAML patterns.
+        dm_resolution = self._data_model_resolver.resolve(
+            tree=tree, frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
+        )
+        result.data_models.extend(dm_resolution.data_models)
+
+        # 8. Queries — raw SQL + ORM call sites attributed to their
+        #    enclosing function for EXECUTES edges.
+        query_resolution = self._query_resolver.resolve(
+            tree=tree, artifacts=function_artifacts,
+            frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
+        )
+        result.queries.extend(query_resolution.queries)
+
+        # 9. Kafka — producer/consumer call sites; topics are global join
+        #    keys that stitch cross-repo PRODUCES/CONSUMES edges.
+        kafka_resolution = self._kafka_resolver.resolve(
+            tree=tree, artifacts=function_artifacts,
+            frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
+        )
+        result.kafka_topics.extend(kafka_resolution.topics)
+        result.kafka_producers.extend(kafka_resolution.producers)
+        result.kafka_consumers.extend(kafka_resolution.consumers)
+
+        # 10. Config bindings — turn CONFIG_VALUE facts that look like
+        #     URLs/hostnames into ExternalConnection records. Cheaper
+        #     deterministic counterpart to Datadog.
+        cfg = self._config_binding_resolver.resolve(
+            tree=tree, repo_id=repo_id, source_service_id=service.id, now=context.now,
+        )
+        result.connections.extend(cfg.connections)
 
     def _build_service(
         self,
@@ -172,6 +261,10 @@ class TestParserAdapter(IngestionAdapter):
         )
 
     def _infer_language(self, tree: FactTree) -> str:
+        """Pick the language name whose extensions account for the most
+        SYMBOL facts in the repo. Falls back to "unknown" if the language
+        library is empty (which happens in test environments without
+        languages/ on disk)."""
         suffix_counts: Counter[str] = Counter()
         for fact in tree.where(kind=FactKind.SYMBOL):
             suffix = Path(fact.file).suffix.lower()
@@ -179,8 +272,11 @@ class TestParserAdapter(IngestionAdapter):
                 suffix_counts[suffix] += 1
         if not suffix_counts:
             return "unknown"
-        most_common_suffix, _ = suffix_counts.most_common(1)[0]
-        return _LANG_BY_SUFFIX.get(most_common_suffix, "unknown")
+        for most_common_suffix, _ in suffix_counts.most_common():
+            profile = self._languages.for_extension(most_common_suffix)
+            if profile is not None:
+                return profile.name
+        return "unknown"
 
     def _rebase(self, artifact: CodeArtifact, repo_root_abs: str) -> CodeArtifact:
         """Rewrite an artifact's `file` to repo-relative and rebuild its ID."""

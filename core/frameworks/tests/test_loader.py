@@ -22,15 +22,28 @@ from core.types.errors import ConfigurationError
 def test_load_library_picks_up_all_shipped_yamls() -> None:
     library = load_library(DEFAULT_FRAMEWORKS_DIR)
     names = library.names()
-    assert set(names) == {"python", "java", "fastapi", "flask", "spring", "pytest"}
+    assert set(names) == {
+        "python",
+        "java",
+        "fastapi",
+        "flask",
+        "spring",
+        "pytest",
+        "pydantic",
+        "sqlalchemy",
+        "kafka_python",
+        "jpa",
+        "spring_kafka",
+        "mockito",
+    }
 
 
 def test_load_library_python_definition_shape() -> None:
     library = load_library(DEFAULT_FRAMEWORKS_DIR)
     python = library.get("python")
     assert python.language == "python"
-    assert python.tests is not None
-    assert "test_" in python.tests.function_name_prefixes
+    # `test_` prefix moved to core/languages/python/profile.yaml; framework YAML only
+    # carries framework-specific test config now (empty for default Python).
     assert python.http_clients is not None
     assert "httpx" in python.http_clients.external_modules
 

@@ -86,6 +86,13 @@ class RoutePatterns(_Frozen):
     """For Java-style: annotation simple names indicating a method handler
     (e.g. `GetMapping`, `PostMapping`)."""
 
+    annotation_method_map: dict[str, str] = Field(default_factory=dict)
+    """Map annotation simple name → HTTP method string. Lets framework YAML
+    declare its own mapping (Spring: GetMapping→get, etc.) instead of a
+    hardcoded dict in the resolver. Annotations not in the map but listed
+    in `annotation_method_names` fall back to the literal kwarg/method
+    value when the strategy can extract one."""
+
     annotation_class_prefix: tuple[str, ...] = ()
     """Class-level annotation simple names that contribute a path prefix
     (e.g. `RequestMapping` in Spring)."""
@@ -132,6 +139,90 @@ class HttpClientPatterns(_Frozen):
     """Import modules whose use indicates a real HTTP/DB/queue call."""
 
 
+class DataModelPatterns(_Frozen):
+    """How this framework declares structured data classes.
+
+    A class matches when ANY of:
+      * its bases include a name whose final segment is in `base_class_suffixes`,
+      * one of its decorators/annotations' callees is in `decorator_callees`,
+      * one of its class-level annotations matches `annotation_callees` (Java).
+
+    `decorator_callees` and `annotation_callees` are conceptually the same
+    (Python @decorator vs Java @Annotation); the split is because language
+    grammars emit different FactKinds (DECORATOR vs ANNOTATION).
+    """
+
+    kind: str = "unknown"
+    """Tag applied to the emitted DataModel.kind: pydantic, dataclass,
+    sqlalchemy_orm, jpa_entity, etc."""
+
+    base_class_suffixes: tuple[str, ...] = ()
+    """Match when the class extends one of these — compared by the final
+    segment so `pydantic.BaseModel` and `BaseModel` both match `BaseModel`."""
+
+    decorator_callees: tuple[str, ...] = ()
+    """Python-side: match when class decorated with one of these (e.g. `dataclass`)."""
+
+    annotation_callees: tuple[str, ...] = ()
+    """Java-side: match when class carries one of these annotations
+    (e.g. `Entity`, `Document`)."""
+
+    table_arg_kwarg: str = ""
+    """For ORM kinds: name of the kwarg holding the table name when set
+    inline (e.g. `__tablename__` won't show up — this is for builder-style
+    cases). Empty when not applicable."""
+
+
+class QueryPatterns(_Frozen):
+    """How queries appear as call sites or annotations.
+
+    A CALL matches when its `method` is in `call_methods` OR its full
+    callee is in `call_callees`. An ANNOTATION matches when its `callee`
+    is in `annotation_callees` (Java `@Query("...")`). In all cases the
+    argument at `expression_arg` is the SQL/JPQL text.
+    """
+
+    kind: str = "raw_sql"
+    """Tag applied to emitted Query.kind."""
+
+    call_methods: tuple[str, ...] = ()
+    """`execute`, `query`, `createQuery`, etc."""
+
+    call_callees: tuple[str, ...] = ()
+    """Full dotted callees like `text` or `sqlalchemy.text`."""
+
+    annotation_callees: tuple[str, ...] = ()
+    """Java-side: annotation names declaring a query (`Query`, `NamedQuery`)."""
+
+    expression_arg: int = 0
+    """Positional index of the SQL/expression argument."""
+
+
+class KafkaPatterns(_Frozen):
+    """Kafka producer/consumer call shapes for this framework."""
+
+    produce_methods: tuple[str, ...] = ()
+    """Method names that publish to a topic: `send`, `produce`."""
+
+    produce_callees: tuple[str, ...] = ()
+    """Full dotted callees: `KafkaTemplate.send`, `confluent_kafka.Producer.produce`."""
+
+    consume_callees: tuple[str, ...] = ()
+    """Constructor/decorator callees that subscribe: `KafkaConsumer`,
+    `@app.agent` (Faust)."""
+
+    consume_annotations: tuple[str, ...] = ()
+    """Java-side: annotations on methods that subscribe (`KafkaListener`).
+    The annotation's first arg / `topics` kwarg holds the topic."""
+
+    topic_arg: int = 0
+    """Position of the topic argument in produce/consume calls."""
+
+    topic_kwarg: str = ""
+    """Kwarg name holding the topic when not positional (Java
+    `@KafkaListener(topics = "user.events")`)."""
+
+
 class FrameworkDefinition(_Frozen):
     name: str
     language: str
@@ -144,4 +235,7 @@ class FrameworkDefinition(_Frozen):
     tests: TestPatterns | None = None
     mocks: MockPatterns | None = None
     http_clients: HttpClientPatterns | None = None
+    data_models: DataModelPatterns | None = None
+    queries: QueryPatterns | None = None
+    kafka: KafkaPatterns | None = None
     notes: str = Field(default="")

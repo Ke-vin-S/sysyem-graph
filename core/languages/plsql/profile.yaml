@@ -1,0 +1,38 @@
+name: plsql
+file_extensions: [".sql", ".pks", ".pkb"]
+
+grammar:
+  # No native Python AST library for PL/SQL exists in the stdlib or in the
+  # dependency set. Files route through LLMGrammar; with the default
+  # NullClient this returns zero facts (clean no-op), but the pipeline
+  # doesn't crash on `.sql` files. Wire a real LLM provider later to
+  # actually extract procedures/packages/triggers.
+  kind: llm
+  prompt_version: extract-facts-plsql-v1
+
+module_resolution:
+  separator: "."
+  candidate_path_templates:
+    - "{module}.pks"
+    - "{module}.pkb"
+    - "{module}.sql"
+
+package_aggregator:
+  # The package spec file (`.pks`) is the public contract; the body (`.pkb`)
+  # implements it. Anything declared in a spec is reachable from outside.
+  files: ["*.pks"]
+
+visibility:
+  rule: plsql_declared_in_spec
+
+test_paths:
+  glob_patterns:
+    - "**/utplsql/**"
+    - "**/test_*.sql"
+    - "**/*_test.sql"
+
+notes: |
+  Hypothetical-language demonstrator. Proves the architecture admits
+  languages without a native AST: drop this YAML, files route through
+  LLMGrammar, no resolver edits required. With NullClient, .sql files
+  produce 0 facts but never break the run.

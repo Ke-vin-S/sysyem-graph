@@ -1,4 +1,4 @@
-"""Load `frameworks/*.yaml` from disk into a FrameworkLibrary."""
+"""Load `frameworks/<lang>/*.yaml` from disk into a FrameworkLibrary."""
 
 from __future__ import annotations
 
@@ -38,8 +38,12 @@ class FrameworkLibrary:
 
 
 def load_library(root: Path | None = None) -> FrameworkLibrary:
-    """Read every `*.yaml` under `root`, validate as FrameworkDefinition,
+    """Read every `<root>/<lang>/*.yaml`, validate as FrameworkDefinition,
     return a FrameworkLibrary.
+
+    Layout: one directory per language, framework YAMLs grouped under it.
+    Top-level `<root>/*.yaml` files are also accepted for back-compat /
+    cross-language framework definitions.
 
     Files that fail validation raise ConfigurationError — we'd rather fail
     loudly at startup than silently drop framework knowledge.
@@ -49,7 +53,7 @@ def load_library(root: Path | None = None) -> FrameworkLibrary:
         raise ConfigurationError(f"frameworks directory not found: {root.resolve()}")
 
     library = FrameworkLibrary()
-    for path in sorted(root.glob("*.yaml")):
+    for path in sorted(root.rglob("*.yaml")):
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except yaml.YAMLError as exc:

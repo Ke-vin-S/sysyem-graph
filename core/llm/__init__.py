@@ -15,14 +15,17 @@ from core.llm.client import (
     SubgraphQuestion,
     SubgraphResolution,
 )
+from core.llm.enhance import EnhanceStats, LLMEnhancer
 from core.llm.null_client import NullClient
 
 __all__ = [
     "BudgetExceeded",
+    "EnhanceStats",
     "FileCache",
     "LLMBudget",
     "LLMCache",
     "LLMClient",
+    "LLMEnhancer",
     "LLMResponse",
     "LLMUsage",
     "NullCache",

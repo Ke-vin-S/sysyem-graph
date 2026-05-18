@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.facts import FactKind
-from ingestion.grammars import PythonGrammar
+from core.languages.python.grammar import PythonGrammar
 
 
 @pytest.fixture

@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from core.graph.client import Neo4jClient
-from core.graph.schema import LOOKUP_INDEXES, UNIQUENESS_CONSTRAINTS
+from core.graph.schema import (
+    LOOKUP_INDEXES,
+    PHASE2_LOOKUP_INDEXES,
+    PHASE2_UNIQUENESS_CONSTRAINTS,
+    UNIQUENESS_CONSTRAINTS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +54,24 @@ def _initial_schema_statements() -> tuple[str, ...]:
     )
 
 
+def _phase2_schema_statements() -> tuple[str, ...]:
+    """Constraints + indexes for the Phase-2 node types (Endpoint, DataModel,
+    Query, Kafka{Topic,Producer,Consumer}, Mock)."""
+    return tuple(c.cypher for c in PHASE2_UNIQUENESS_CONSTRAINTS) + tuple(
+        i.cypher for i in PHASE2_LOOKUP_INDEXES
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
         name="initial_schema",
         statements=_initial_schema_statements(),
+    ),
+    Migration(
+        version=2,
+        name="phase2_node_constraints",
+        statements=_phase2_schema_statements(),
     ),
     # Reserve future versions here. Never re-number an existing migration.
 )

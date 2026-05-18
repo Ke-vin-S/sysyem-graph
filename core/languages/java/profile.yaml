@@ -1,0 +1,33 @@
+name: java
+file_extensions: [".java"]
+
+grammar:
+  kind: native
+  driver: core.languages.java.grammar.JavaGrammar
+
+module_resolution:
+  separator: "."
+  candidate_path_templates:
+    - "{module}.java"
+
+package_aggregator:
+  # Java has no `__init__.py`-style re-exports; star imports aren't
+  # something resolvers follow because they don't name a target symbol.
+  files: []
+
+visibility:
+  rule: java_public_modifier
+
+test_paths:
+  # JUnit uses annotations, not name prefixes, so no defaults here.
+  function_name_prefixes: []
+  glob_patterns:
+    - "**/src/test/java/**"
+    - "**/*Test.java"
+    - "**/*Tests.java"
+    - "**/*IT.java"
+
+notes: |
+  Java packages map directly to directories. Class visibility is decided by
+  the `public` modifier on the declaration — package-private classes don't
+  cross repo boundaries in the impact graph.

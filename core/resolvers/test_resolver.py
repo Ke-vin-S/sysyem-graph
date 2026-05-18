@@ -34,7 +34,7 @@ class TestResolver:
     def resolve(self, context: ResolverContext) -> list[TestCase]:
         # Build a per-language merged view: function name prefixes, decorator
         # callees, integration/e2e markers, mock annotations, external modules.
-        merged = _merge_test_rules(context.frameworks)
+        merged = _merge_test_rules(context.frameworks, context.languages)
         tree = context.tree
 
         # Map import-module -> file, used to know which modules a file imports
@@ -99,7 +99,10 @@ class _MergedTestRules:
     mock_field_annotations: frozenset[str]
 
 
-def _merge_test_rules(frameworks: tuple[EffectiveFramework, ...]) -> _MergedTestRules:
+def _merge_test_rules(
+    frameworks: tuple[EffectiveFramework, ...],
+    languages: object | None = None,
+) -> _MergedTestRules:
     fn_prefixes: set[str] = set()
     decorator_callees: set[str] = set()
     integration_markers: set[str] = set()
@@ -109,6 +112,13 @@ def _merge_test_rules(frameworks: tuple[EffectiveFramework, ...]) -> _MergedTest
     external_modules: set[str] = set()
     mock_decorator_callees: set[str] = set()
     mock_field_annotations: set[str] = set()
+
+    # Language-level baselines (apply across frameworks). e.g. `test_` prefix
+    # comes from `core/languages/python/profile.yaml` whether or not the project uses pytest.
+    if languages is not None:
+        for profile in languages.all():
+            fn_prefixes.update(profile.test_paths.function_name_prefixes)
+            test_path_globs.extend(profile.test_paths.glob_patterns)
 
     for fw in frameworks:
         if fw.tests is not None:

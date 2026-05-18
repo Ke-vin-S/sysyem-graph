@@ -1,20 +1,20 @@
 """Charge endpoints. Mounted at /payments by src/main.py."""
 
-import httpx
 from fastapi import APIRouter
+
+from src.billing.client import fetch_charge, post_charge
 
 router = APIRouter()
 
 
 @router.get("/charges/{id}")
 async def get_charge(id: str):
-    response = httpx.get(f"http://billing-service/charges/{id}")
-    return response.json()
+    return fetch_charge(id)
 
 
 @router.post("/charges")
 async def create_charge(amount: int):
-    return {"id": "abc", "amount": amount}
+    return post_charge(amount)
 
 
 @router.delete("/charges/{id}")

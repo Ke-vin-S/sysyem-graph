@@ -1,0 +1,27 @@
+name: sqlalchemy
+language: python
+detectors:
+  - any_import_starts_with: ["sqlalchemy"]
+
+data_models:
+  kind: sqlalchemy_orm
+  base_class_suffixes:
+    - Base
+    - DeclarativeBase
+
+queries:
+  kind: raw_sql
+  call_methods:
+    - execute
+    - scalar
+    - scalars
+  call_callees:
+    - text
+    - sqlalchemy.text
+    - sa.text
+  expression_arg: 0
+
+notes: |
+  SQLAlchemy ORM (declarative_base / DeclarativeBase) + Core (text()).
+  `Base` is conventional, not required by the library — repos that
+  rename their declarative base will need an overlay or a YAML edit.

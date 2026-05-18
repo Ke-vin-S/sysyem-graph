@@ -2,20 +2,18 @@ name: java
 language: java
 detectors:
   - any_file_glob: ["*.java", "**/*.java"]
+
+# Language-level test paths (src/test/java, *Test.java naming) live in
+# `core/languages/java/profile.yaml`. JUnit annotations and Mockito
+# patterns stay here because they're framework-specific.
+
 tests:
-  function_name_prefixes: []
   decorator_callees:
     - "Test"
     - "ParameterizedTest"
     - "RepeatedTest"
     - "TestFactory"
     - "TestTemplate"
-  test_path_globs:
-    - "**/src/test/java/**"
-    - "**/*Test.java"
-    - "**/*Tests.java"
-    - "**/*IT.java"
-  test_path_prefixes: []
 mocks:
   field_annotations:
     - "Mock"
@@ -49,4 +47,5 @@ http_clients:
     - com.mongodb
     - org.neo4j.driver
 notes: |
-  Base Java knowledge spanning JUnit 4, JUnit 5 (Jupiter), TestNG, and Mockito.
+  Java framework knowledge spanning JUnit 4/5 and Mockito. Test-path
+  conventions and `.java` resolution come from core/languages/java/profile.yaml.

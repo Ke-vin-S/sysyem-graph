@@ -60,15 +60,49 @@ def run(
         typer.secho(f"error: {error}", fg=typer.colors.RED)
 
     out.mkdir(parents=True, exist_ok=True)
-    services = list(report.merged.services.values())
-    connections = list(report.merged.connections.values())
-    artifacts = list(report.merged.artifacts.values())
-    tests = list(report.merged.tests.values())
+    merged = report.merged
+    services = list(merged.services.values())
+    connections = list(merged.connections.values())
+    artifacts = list(merged.artifacts.values())
+    tests = list(merged.tests.values())
+    endpoints = list(merged.endpoints.values())
+    data_models = list(merged.data_models.values())
+    queries = list(merged.queries.values())
+    kafka_topics = list(merged.kafka_topics.values())
+    kafka_producers = list(merged.kafka_producers.values())
+    kafka_consumers = list(merged.kafka_consumers.values())
+    mocks = list(merged.mocks.values())
+
     _dump(out / "services.json", [s.model_dump(mode="json") for s in services])
     _dump(out / "connections.json", [c.model_dump(mode="json") for c in connections])
     _dump(out / "artifacts.json", [a.model_dump(mode="json") for a in artifacts])
     _dump(out / "tests.json", [t.model_dump(mode="json") for t in tests])
-    _dump(out / "relationships.json", _build_relationships(services, connections, artifacts, tests))
+    _dump(out / "endpoints.json", [e.model_dump(mode="json") for e in endpoints])
+    _dump(out / "data_models.json", [d.model_dump(mode="json") for d in data_models])
+    _dump(out / "queries.json", [q.model_dump(mode="json") for q in queries])
+    _dump(out / "kafka_topics.json", [t.model_dump(mode="json") for t in kafka_topics])
+    _dump(out / "kafka_producers.json", [p.model_dump(mode="json") for p in kafka_producers])
+    _dump(out / "kafka_consumers.json", [c.model_dump(mode="json") for c in kafka_consumers])
+    _dump(out / "mocks.json", [m.model_dump(mode="json") for m in mocks])
+    _dump(
+        out / "suggestions.json",
+        [s.model_dump(mode="json") for s in merged.suggestions.values()],
+    )
+    _dump(
+        out / "relationships.json",
+        _build_relationships(
+            services,
+            connections,
+            artifacts,
+            tests,
+            endpoints,
+            data_models,
+            queries,
+            kafka_producers,
+            kafka_consumers,
+            mocks,
+        ),
+    )
     typer.echo(f"wrote merged records to {out}")
 
     if report.failures or report.validation.errors:
@@ -90,16 +124,23 @@ def _register_adapters(
             registry.register(TestParserAdapter(cfg))
 
 
-def _build_relationships(services, connections, artifacts, tests) -> list[dict[str, Any]]:
+def _build_relationships(
+    services,
+    connections,
+    artifacts,
+    tests,
+    endpoints,
+    data_models,
+    queries,
+    kafka_producers,
+    kafka_consumers,
+    mocks,
+) -> list[dict[str, Any]]:
     """Materialize the Neo4j edge list from foreign keys on the records.
 
-    Edges emitted (matching the Neo4j schema in docs/QUICK_REFERENCE.md):
-      (Service)-[:CONTAINS]->(CodeArtifact)
-      (Service)-[:DEFINES]->(TestCase)
-      (TestCase)-[:COVERS]->(CodeArtifact)
-      (Service)-[:INITIATES]->(ExternalConnection)
-      (ExternalConnection)-[:TARGETS]->(Service)        when target_service_id known
-      (CodeArtifact)-[:EXPOSES]->(ExternalConnection)    from artifact.external_connections
+    Mirrors what GraphLoader writes — kept here so the JSON dump is
+    self-describing for downstream consumers that don't replay through the
+    loader.
     """
     service_ids = {s.id for s in services}
     edges: list[dict[str, Any]] = []
@@ -109,6 +150,8 @@ def _build_relationships(services, connections, artifacts, tests) -> list[dict[s
             edges.append({"src": artifact.repo_id, "rel": "CONTAINS", "dst": artifact.id})
         for conn_id in artifact.external_connections:
             edges.append({"src": artifact.id, "rel": "EXPOSES", "dst": conn_id})
+        for callee_id in artifact.calls:
+            edges.append({"src": artifact.id, "rel": "CALLS", "dst": callee_id})
 
     for test in tests:
         if test.repo_id in service_ids:
@@ -121,6 +164,42 @@ def _build_relationships(services, connections, artifacts, tests) -> list[dict[s
             edges.append({"src": conn.source_service_id, "rel": "INITIATES", "dst": conn.id})
         if conn.target_service_id and conn.target_service_id in service_ids:
             edges.append({"src": conn.id, "rel": "TARGETS", "dst": conn.target_service_id})
+
+    for endpoint in endpoints:
+        if endpoint.repo_id in service_ids:
+            edges.append({"src": endpoint.repo_id, "rel": "CONTAINS", "dst": endpoint.id})
+        if endpoint.handler_artifact_id:
+            edges.append(
+                {"src": endpoint.id, "rel": "HANDLED_BY", "dst": endpoint.handler_artifact_id}
+            )
+
+    for dm in data_models:
+        if dm.repo_id in service_ids:
+            edges.append({"src": dm.repo_id, "rel": "CONTAINS", "dst": dm.id})
+
+    for query in queries:
+        if query.repo_id in service_ids:
+            edges.append({"src": query.repo_id, "rel": "CONTAINS", "dst": query.id})
+        if query.enclosing_artifact_id:
+            edges.append(
+                {"src": query.enclosing_artifact_id, "rel": "EXECUTES", "dst": query.id}
+            )
+
+    for producer in kafka_producers:
+        edges.append(
+            {"src": producer.id, "rel": "PRODUCES", "dst": f"topic:{producer.topic_name}"}
+        )
+
+    for consumer in kafka_consumers:
+        edges.append(
+            {"src": consumer.id, "rel": "CONSUMES", "dst": f"topic:{consumer.topic_name}"}
+        )
+
+    for mock in mocks:
+        if mock.target_artifact_id:
+            edges.append(
+                {"src": mock.test_id, "rel": "MOCKS", "dst": mock.target_artifact_id}
+            )
 
     return edges
 

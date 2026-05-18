@@ -25,13 +25,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.facts import Fact, FactTree
-from ingestion.grammars import (
-    ConfigGrammar,
-    Grammar,
-    JavaGrammar,
-    LLMGrammar,
-    PythonGrammar,
-)
+from core.languages.java.grammar import JavaGrammar
+from core.languages.python.grammar import PythonGrammar
+from ingestion.grammars import ConfigGrammar, Grammar, LLMGrammar
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +52,33 @@ class WalkerConfig:
     follow_symlinks: bool = False
 
 
+def _default_grammars() -> list[Grammar]:
+    """Build the default grammar list from `core/languages/<lang>/profile.yaml`
+    via the grammar registry. Falls back to the legacy hardcoded list if the
+    library can't be loaded (e.g. tests in a temp dir without the layout on
+    disk)."""
+    try:
+        from core.languages import load_library
+        from core.languages.grammar_registry import build_grammars
+
+        return build_grammars(load_library())
+    except Exception:
+        return [PythonGrammar(), JavaGrammar(), ConfigGrammar()]
+
+
 @dataclass
 class Walker:
     """File-tree walker that emits a FactTree per repo.
 
-    Pass `grammars` to override the default set. The default includes Python,
-    Java, and Config grammars; the LLM grammar is opt-in via `llm_grammar`
-    because most callers don't want a 3rd-party call by default.
+    The default grammar list is driven by `core/languages/<lang>/profile.yaml`
+    via the grammar registry. Pass `grammars` explicitly to override.
+
+    `llm_grammar` is kept as a back-compat knob — callers who want to
+    inject a custom LLMGrammar can still do so. The default registry
+    already wires LLMGrammar for any language with `kind: llm`.
     """
 
-    grammars: list[Grammar] = field(
-        default_factory=lambda: [PythonGrammar(), JavaGrammar(), ConfigGrammar()]
-    )
+    grammars: list[Grammar] = field(default_factory=_default_grammars)
     llm_grammar: LLMGrammar | None = None
     config: WalkerConfig = field(default_factory=WalkerConfig)
 

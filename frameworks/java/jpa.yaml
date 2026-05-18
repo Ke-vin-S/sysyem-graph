@@ -1,0 +1,27 @@
+name: jpa
+language: java
+detectors:
+  - any_import_starts_with:
+      - "javax.persistence"
+      - "jakarta.persistence"
+
+data_models:
+  kind: jpa_entity
+  annotation_callees:
+    - Entity
+    - MappedSuperclass
+
+queries:
+  kind: jpql
+  annotation_callees:
+    - Query
+    - NamedQuery
+  call_methods:
+    - createQuery
+    - createNamedQuery
+  expression_arg: 0
+
+notes: |
+  JPA / Jakarta Persistence. `@Entity` classes are DataModels(jpa_entity).
+  `@Query("...")` annotations on repository methods and
+  `entityManager.createQuery("...")` calls become Query records.

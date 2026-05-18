@@ -1,0 +1,21 @@
+name: kafka_python
+language: python
+detectors:
+  - any_import_starts_with: ["kafka", "confluent_kafka"]
+
+kafka:
+  produce_methods:
+    - send
+    - produce
+  produce_callees: []
+  consume_callees:
+    - KafkaConsumer
+    - Consumer
+  topic_arg: 0
+
+notes: |
+  kafka-python and confluent-kafka producer/consumer detection.
+  Producers: `KafkaProducer.send("topic", ...)` / `Producer.produce("topic", ...)`.
+  Consumers: `KafkaConsumer("topic", ...)` constructor.
+  Faust agents (`@app.agent("topic")`) covered separately by a future
+  faust.yaml — pattern is decorator-shaped, not call-shaped.

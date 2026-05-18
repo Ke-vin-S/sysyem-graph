@@ -1,0 +1,16 @@
+name: pydantic
+language: python
+detectors:
+  - any_import_starts_with: ["pydantic"]
+
+data_models:
+  kind: pydantic
+  base_class_suffixes:
+    - BaseModel
+    - BaseSettings
+
+notes: |
+  Pydantic v1 + v2 model detection. Any class whose bases include
+  `BaseModel` (or `BaseSettings` for pydantic-settings) is treated as a
+  DataModel. Fields are populated by future grammar work — v1 captures
+  identity only.
