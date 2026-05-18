@@ -1,26 +1,28 @@
-"""Service layer between the FastAPI router and the billing/storage modules.
+"""Service layer between the FastAPI router and the repository.
 
-Exists primarily to exercise the call graph through a Depends-injected
-parameter: the router declares `service: ChargeService = Depends(ChargeService)`
-and then calls `service.get(...)`. The resolver should resolve those calls
-through the param's type annotation to the ChargeService methods below.
+Demonstrates the resolver's new patterns:
+  * `self.repo.fetch(...)` — `self.<attr>.<method>()` resolves through
+    __init__'s `repo: ChargeRepository` annotation.
+  * `self._record_cancellation()` — same-class self-dispatch.
 """
 
-from src.billing.client import fetch_charge, post_charge
-from src.billing.store import get_charge_row, record_payment
+from src.repos.charge_repo import ChargeRepository
 
 
 class ChargeService:
+    def __init__(self, repo: ChargeRepository):
+        self.repo = repo
+
     def get(self, charge_id: str) -> dict:
-        # Direct same-module function call — already resolves today.
-        return fetch_charge(charge_id)
+        # `self.repo.fetch` -> ChargeRepository.fetch
+        return self.repo.fetch(charge_id)
 
     def create(self, amount: int) -> dict:
-        return post_charge(amount)
+        return self.repo.create(amount)
 
     def cancel(self, charge_id: str) -> None:
-        # Same-class dispatch via self — exercises the self.method() fix.
         self._record_cancellation(charge_id)
 
     def _record_cancellation(self, charge_id: str) -> None:
-        record_payment(None, charge_id, 0)
+        # No-op stand-in.
+        return None

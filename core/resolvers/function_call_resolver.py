@@ -111,9 +111,16 @@ class FunctionCallResolver:
                     methods_by_qualifier[(art.file, class_name, art.name)] = art
 
         alias_map = self._build_alias_map(tree, repo_root, languages)
-        params_by_artifact_id = self._build_params_index(
-            tree, repo_root, repo_id_of(artifacts_list)
-        )
+        repo_id = repo_id_of(artifacts_list)
+        params_by_artifact_id = self._build_params_index(tree, repo_root, repo_id)
+        # (file, class_name) -> {attr -> type}. Built from __init__'s
+        # self_assignments + params: if `self.repo = repo` and
+        # `__init__(self, repo: UserRepository)`, then `self.repo` is a
+        # `UserRepository`. Catches the classic constructor-DI pattern.
+        self_attr_types = self._build_self_attr_types(tree, repo_root)
+        # (file, name) -> type for module-level `var = SomeClass(...)`.
+        # Lets `db = Database(); db.query()` resolve to `Database.query`.
+        module_var_types = self._build_module_var_types(tree, repo_root)
 
         # Per-artifact callee accumulator (preserve insertion order).
         callees: dict[str, list[str]] = {a.id: [] for a in artifacts_list}
@@ -137,9 +144,24 @@ class FunctionCallResolver:
                 enclosing=enclosing,
                 methods_by_qualifier=methods_by_qualifier,
                 params_by_artifact_id=params_by_artifact_id,
+                self_attr_types=self_attr_types,
+                module_var_types=module_var_types,
             )
             if callee_artifact is None:
-                continue
+                # `Depends(get_db)` and similar dependency-injection markers:
+                # the call's callee is `Depends`, and one of its args is a
+                # `<name:get_db>` reference. Treat as a CALLS edge to the
+                # named target so the chain `endpoint -> get_db` materializes.
+                callee_artifact = self._resolve_dependency_injection(
+                    call=call,
+                    call_file=call_file,
+                    profile=self._profile_for(call_file, languages),
+                    file_imports=self._file_import_index(tree, call_file, repo_root),
+                    alias_map=alias_map,
+                    by_file_name=by_file_name,
+                )
+                if callee_artifact is None:
+                    continue
             if callee_artifact.id == enclosing.id:
                 continue  # recursive self-call: edge would be a self-loop
 
@@ -179,6 +201,8 @@ class FunctionCallResolver:
         enclosing: CodeArtifact,
         methods_by_qualifier: dict[tuple[str, str, str], CodeArtifact],
         params_by_artifact_id: dict[str, dict[str, str]],
+        self_attr_types: dict[tuple[str, str], dict[str, str]],
+        module_var_types: dict[tuple[str, str], str],
     ) -> CodeArtifact | None:
         receiver = str(call.data.get("receiver", ""))
         method = str(call.data.get("method", ""))
@@ -213,6 +237,38 @@ class FunctionCallResolver:
                 if target is not None:
                     return target
             return None
+
+        # `self.attr.method()` — receiver_chain starts with self, attr resolves
+        # through the enclosing class's __init__ params (the constructor-DI
+        # pattern). The data we need is on the SYMBOL fact already; resolver
+        # just reads it.
+        receiver_chain = list(call.data.get("receiver_chain") or [])
+        if (
+            len(receiver_chain) >= 2
+            and receiver_chain[0] == "self"
+            and enclosing.type == "method"
+        ):
+            class_name = _class_of_method(enclosing)
+            attr = receiver_chain[1]
+            attr_type = (
+                self_attr_types.get((enclosing.file, class_name), {}).get(attr)
+                if class_name
+                else None
+            )
+            if attr_type:
+                target = self._lookup_method_by_type(
+                    type_name=attr_type,
+                    method_name=method,
+                    caller_file=call_file,
+                    profile=profile,
+                    file_imports=file_imports,
+                    alias_map=alias_map,
+                    methods_by_qualifier=methods_by_qualifier,
+                )
+                if target is not None:
+                    return target
+            # Don't return None — fall through; might still match by other
+            # paths (rare, but cheap to try).
 
         # `receiver.method()` — receiver may be a module alias, a real module,
         # or an unresolved name (e.g. a local variable / `self`).
@@ -273,6 +329,71 @@ class FunctionCallResolver:
                 if target is not None:
                     return target
 
+        # Step 5: receiver is a module-level variable bound to a constructor
+        # call — `db = Database(); db.query(...)`. The ASSIGNMENT fact tells
+        # us the bound type; dispatch on its methods.
+        module_type = module_var_types.get((call_file, head))
+        if module_type:
+            target = self._lookup_method_by_type(
+                type_name=module_type,
+                method_name=method,
+                caller_file=call_file,
+                profile=profile,
+                file_imports=file_imports,
+                alias_map=alias_map,
+                methods_by_qualifier=methods_by_qualifier,
+            )
+            if target is not None:
+                return target
+
+        return None
+
+    def _resolve_dependency_injection(
+        self,
+        *,
+        call: Fact,
+        call_file: str,
+        profile: LanguageProfile,
+        file_imports: "_ImportIndex",
+        alias_map: dict[tuple[str, str], list[tuple[str, str]]],
+        by_file_name: dict[tuple[str, str], CodeArtifact],
+    ) -> CodeArtifact | None:
+        """Recognize FastAPI's `Depends(get_db)` / `Depends(get_user)` shape.
+
+        These calls are passing-a-function semantically: the function `X` is
+        guaranteed to be invoked by the framework. Without recognizing this,
+        the call graph loses every `endpoint -> dependency_provider` edge
+        — exactly the user-reported "get_db is isolated" symptom.
+
+        Heuristic: if the call's callee is `Depends` (or ends with `.Depends`)
+        and the first arg is a `<name:X>` placeholder, resolve X like a bare
+        named call. We deliberately don't recognize `Annotated[..., Depends(X)]`
+        yet — the args parser flattens that — but the dominant pattern is
+        the bare `Depends(X)` form, which works.
+        """
+        callee = str(call.data.get("callee", ""))
+        if callee != "Depends" and not callee.endswith(".Depends"):
+            return None
+        args = call.data.get("args") or []
+        if not args:
+            return None
+        first = args[0]
+        if not isinstance(first, str) or not first.startswith("<name:"):
+            return None
+        dep_name = first[len("<name:") : -1]
+        # Same-file def?
+        target = by_file_name.get((call_file, dep_name))
+        if target is not None:
+            return target
+        # Imported by name from somewhere — reuse the from-import path.
+        for module, name, _level in file_imports.from_names:
+            if name != dep_name:
+                continue
+            target = self._lookup_by_module(
+                module, dep_name, profile, alias_map, by_file_name
+            )
+            if target is not None:
+                return target
         return None
 
     def _lookup_method_by_type(
@@ -364,6 +485,84 @@ class FunctionCallResolver:
                     normalized[str(entry[0])] = str(entry[1])
             if normalized:
                 out[artifact_id] = normalized
+        return out
+
+    # ---- self.attr type inference -------------------------------------
+
+    def _build_self_attr_types(
+        self,
+        tree: FactTree,
+        repo_root: str | None,
+    ) -> dict[tuple[str, str], dict[str, str]]:
+        """`(file, class_name) -> {attr -> type_hint}` derived from each
+        `__init__`'s params + self_assignments. Catches the constructor-DI
+        pattern: `def __init__(self, repo: Repo): self.repo = repo` yields
+        `self.repo -> Repo`. Same idea for `self.x = Foo()` (literal type)
+        and `self.y: T = ...` (annotated).
+        """
+        out: dict[tuple[str, str], dict[str, str]] = {}
+        for sym in tree.where(kind=FactKind.SYMBOL):
+            if sym.data.get("sym_kind") != "method":
+                continue
+            if sym.data.get("name") != "__init__":
+                continue
+            class_name = str(sym.data.get("enclosing_class", ""))
+            if not class_name:
+                continue
+            file = _rel_to(sym.file, repo_root) if repo_root else sym.file
+            # param-name -> type
+            param_types: dict[str, str] = {}
+            for entry in sym.data.get("params") or ():
+                if len(entry) >= 2 and entry[1]:
+                    param_types[str(entry[0])] = str(entry[1])
+            attr_types: dict[str, str] = {}
+            for sa in sym.data.get("self_assignments") or ():
+                attr = str(sa.get("attr", ""))
+                if not attr:
+                    continue
+                # Annotated assignment wins (`self.x: T = ...`).
+                hint = str(sa.get("type_hint", ""))
+                if hint:
+                    attr_types[attr] = hint
+                    continue
+                source_kind = str(sa.get("source_kind", ""))
+                source = str(sa.get("source", ""))
+                if source_kind == "name" and source in param_types:
+                    attr_types[attr] = param_types[source]
+                elif source_kind == "call" and source:
+                    # `self.db = Database()` -> Database
+                    attr_types[attr] = source
+            if attr_types:
+                out[(file, class_name)] = attr_types
+        return out
+
+    # ---- module-level variable type inference -------------------------
+
+    def _build_module_var_types(
+        self,
+        tree: FactTree,
+        repo_root: str | None,
+    ) -> dict[tuple[str, str], str]:
+        """`(file, var_name) -> type_hint` for module-level `var = SomeClass(...)`
+        or `var: T = ...`. Lets calls on module singletons resolve."""
+        out: dict[tuple[str, str], str] = {}
+        for fact in tree.where(kind=FactKind.ASSIGNMENT):
+            if fact.data.get("scope") != "module":
+                continue
+            chain = list(fact.data.get("target_chain") or ())
+            if len(chain) != 1:
+                continue
+            var = chain[0]
+            type_hint = str(fact.data.get("type_hint", ""))
+            if type_hint:
+                out[(fact.file if repo_root is None else _rel_to(fact.file, repo_root), var)] = type_hint
+                continue
+            source_kind = str(fact.data.get("source_kind", ""))
+            source = str(fact.data.get("source", ""))
+            if source_kind == "call" and source:
+                out[
+                    (fact.file if repo_root is None else _rel_to(fact.file, repo_root), var)
+                ] = source
         return out
 
     # ---- alias map (same approach as CoverageResolver) -----------------

@@ -56,6 +56,24 @@ class FactKind(StrEnum):
     """A reference to a type by name. Used by resolvers when a class declaration
     lives in one file but a controller annotation refers to it."""
 
+    ASSIGNMENT = "assignment"
+    """A name-binding statement: `x = expr`, `self.x = expr`, `x: T = expr`.
+
+    Scope is one of {module, function, method, class}. Grammars emit
+    assignments selectively — typically module-level and self.X = inside
+    methods, since those are the ones the resolver uses for type
+    inference. In-function local assignments are ignored to keep the fact
+    count bounded.
+
+    `data` shape:
+      target: str               # short name (`x`, or last segment of `self.x`)
+      target_chain: list[str]   # `self.x` -> ["self", "x"]
+      source_kind: str          # call | name | literal | attr | expr
+      source: str               # callee/name/value, raw string form
+      type_hint: str            # `db: Database = ...` -> "Database"
+      scope: str                # module | function | method | class
+    """
+
 
 class Fact(BaseModel):
     """An atomic, uninterpreted observation from a source file.

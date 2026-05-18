@@ -6,14 +6,15 @@ from core.languages import load_library
 from core.languages.grammar_registry import build_grammars
 from core.languages.library import DEFAULT_LANGUAGES_DIR
 from core.languages.java.grammar import JavaGrammar
-from core.languages.python.grammar import PythonGrammar
+from core.languages.python.tree_sitter_grammar import TreeSitterPythonGrammar
 from ingestion.grammars import ConfigGrammar, LLMGrammar
 
 
 def test_build_grammars_loads_native_drivers() -> None:
     grammars = build_grammars(load_library(DEFAULT_LANGUAGES_DIR))
     types = {type(g).__name__ for g in grammars}
-    assert "PythonGrammar" in types
+    # Python's profile.yaml now wires the tree-sitter grammar as the default.
+    assert "TreeSitterPythonGrammar" in types
     assert "JavaGrammar" in types
     # ConfigGrammar always added so YAML/TOML/properties facts feed resolvers.
     assert "ConfigGrammar" in types
@@ -31,7 +32,7 @@ def test_native_grammar_matches_its_extension() -> None:
     grammars = build_grammars(load_library(DEFAULT_LANGUAGES_DIR))
     from pathlib import Path
 
-    py_g = next(g for g in grammars if isinstance(g, PythonGrammar))
+    py_g = next(g for g in grammars if isinstance(g, TreeSitterPythonGrammar))
     java_g = next(g for g in grammars if isinstance(g, JavaGrammar))
     cfg_g = next(g for g in grammars if isinstance(g, ConfigGrammar))
 

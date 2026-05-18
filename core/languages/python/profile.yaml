@@ -3,7 +3,10 @@ file_extensions: [".py"]
 
 grammar:
   kind: native
-  driver: core.languages.python.grammar.PythonGrammar
+  # Tree-sitter-driven extractor. The legacy ast.parse-based
+  # `core.languages.python.grammar.PythonGrammar` is kept for fallback
+  # and parity tests, but is no longer the default.
+  driver: core.languages.python.tree_sitter_grammar.TreeSitterPythonGrammar
 
 module_resolution:
   separator: "."
