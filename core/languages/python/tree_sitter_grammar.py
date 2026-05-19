@@ -135,7 +135,18 @@ class TreeSitterPythonGrammar(Grammar):
                         self._emit_assignment(inner, facts, ctx, scope=scope)
                 for call in _iter_calls(child):
                     self._emit_call(call, facts, ctx)
-            elif t in ("if_statement", "try_statement", "with_statement", "for_statement", "while_statement"):
+            elif t in (
+                # Compound statements + their sub-clauses. Without the clause
+                # types, anything inside `except:` / `elif:` / `else:` /
+                # `finally:` / `case:` would only get CALL extraction — every
+                # import, assignment, and nested def in those branches would
+                # silently vanish.
+                "if_statement", "try_statement", "with_statement",
+                "for_statement", "while_statement", "match_statement",
+                "elif_clause", "else_clause",
+                "except_clause", "except_group_clause", "finally_clause",
+                "case_clause",
+            ):
                 # Recurse into compound statements without changing scope.
                 self._walk_block(
                     child, facts, ctx,

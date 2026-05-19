@@ -213,6 +213,35 @@ def test_call_receiver_chain_decomposes_self_attr(grammar: TreeSitterPythonGramm
     assert target.data["receiver_chain"] == ["self", "repo"]
 
 
+def test_facts_emitted_inside_try_except_finally(grammar: TreeSitterPythonGrammar) -> None:
+    """Imports, assignments, and nested defs inside `try` / `except` /
+    `finally` / `elif` / `else` blocks must all surface as facts. The
+    previous walker only descended into compound statements but stopped
+    at their sub-clauses — every branch except `try`'s body was dropping
+    structural facts silently."""
+    src = (
+        "try:\n"
+        "    from a import x\n"
+        "    a_val = x()\n"
+        "except ImportError:\n"
+        "    from b import x\n"
+        "    a_val = None\n"
+        "finally:\n"
+        "    from c import done\n"
+        "if FLAG:\n"
+        "    from p import handler\n"
+        "else:\n"
+        "    from s import handler\n"
+    )
+    facts = grammar.extract(Path("x.py"), src, repo_id="r")
+    modules = {f.data["module"] for f in facts if f.kind is FactKind.IMPORT}
+    assert modules == {"a", "b", "c", "p", "s"}
+    # Both the try-body and except-block assignments emit at module scope.
+    assigns = [f for f in facts if f.kind is FactKind.ASSIGNMENT]
+    assert len(assigns) == 2
+    assert {a.data["source_kind"] for a in assigns} == {"call", "literal"}
+
+
 def test_relative_import_level_captured(grammar: TreeSitterPythonGrammar) -> None:
     facts = grammar.extract(
         Path("pkg/sub/x.py"),
