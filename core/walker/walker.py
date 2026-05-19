@@ -20,6 +20,7 @@ support natively, while still letting it cover new-language files.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,20 @@ from core.languages.python.grammar import PythonGrammar
 from ingestion.grammars import ConfigGrammar, Grammar, LLMGrammar
 
 logger = logging.getLogger(__name__)
+
+# Heartbeat cadence — chosen so a 50k-file repo emits 50–100 lines (not 5,000)
+# and so a slow-parsing file can't make the user think we're hung. Tune via
+# WalkerConfig if needed later.
+_HEARTBEAT_FILES = 500
+_HEARTBEAT_SECONDS = 5.0
+
+
+def _short(file: Path, root: Path) -> str:
+    """Repo-relative path for log lines; falls back to the bare name."""
+    try:
+        return str(file.relative_to(root))
+    except ValueError:
+        return file.name
 
 
 @dataclass
@@ -92,7 +107,12 @@ class Walker:
     config: WalkerConfig = field(default_factory=WalkerConfig)
 
     def walk(self, root: Path, *, repo_id: str) -> FactTree:
-        """Walk `root`, dispatch each file to a grammar, return a FactTree."""
+        """Walk `root`, dispatch each file to a grammar, return a FactTree.
+
+        Logs a heartbeat every `_HEARTBEAT_FILES` dispatched files OR every
+        `_HEARTBEAT_SECONDS`, whichever comes first — so big repos don't go
+        silent for minutes during the parse phase.
+        """
         tree = FactTree(repo_id=repo_id)
         if not root.exists():
             return tree
@@ -102,11 +122,35 @@ class Walker:
                 tree.extend(self._extract(root, grammar, repo_id))
             return tree
 
+        logger.info("walker[%s]: starting walk of %s", repo_id, root)
+        started = time.monotonic()
+        last_beat = started
+        seen = 0
+        dispatched = 0
+        skipped = 0
         for file in self._iter_files(root):
+            seen += 1
             grammar = self._grammar_for(file)
             if grammar is None:
+                skipped += 1
                 continue
             tree.extend(self._extract(file, grammar, repo_id))
+            dispatched += 1
+            if dispatched and (
+                dispatched % _HEARTBEAT_FILES == 0
+                or (time.monotonic() - last_beat) >= _HEARTBEAT_SECONDS
+            ):
+                now = time.monotonic()
+                logger.info(
+                    "walker[%s]: %d files parsed, %d skipped, %.1fs elapsed (last=%s)",
+                    repo_id, dispatched, skipped, now - started, _short(file, root),
+                )
+                last_beat = now
+        elapsed = time.monotonic() - started
+        logger.info(
+            "walker[%s]: done — %d parsed, %d skipped, %d facts in %.1fs",
+            repo_id, dispatched, skipped, len(tree), elapsed,
+        )
         return tree
 
     def _grammar_for(self, file: Path) -> Grammar | None:

@@ -19,7 +19,9 @@ TestCase.covers_artifacts gives the explicit (TestCase)-[:COVERS]->
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,6 +48,23 @@ from core.walker import Walker
 from ingestion.adapters.testparser.config import TestParserAdapterConfig
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _timed(stage: str, repo_id: str):
+    """Log entry + exit for a pipeline stage. Big repos otherwise look hung.
+
+    Pattern: every resolver gets wrapped so the operator sees, in order,
+    "starting <stage>" and "<stage>: <n_items> in <s>s" with the stage
+    name as the searchable key.
+    """
+    started = time.monotonic()
+    logger.info("testparser[%s]: %s starting", repo_id, stage)
+    yield
+    logger.info(
+        "testparser[%s]: %s done in %.2fs",
+        repo_id, stage, time.monotonic() - started,
+    )
 
 
 class TestParserAdapter(IngestionAdapter):
@@ -125,9 +144,19 @@ class TestParserAdapter(IngestionAdapter):
     ) -> None:
         repo_id = repo_dir.name
         repo_root_abs = str(repo_dir.resolve())
-        tree = self._walker.walk(repo_dir, repo_id=repo_id)
-        detected = detect_frameworks(tree, self._library)
-        effective = tuple(compose(fw, None) for fw in detected)
+        repo_started = time.monotonic()
+        logger.info("testparser[%s]: repo extraction starting at %s", repo_id, repo_dir)
+
+        with _timed("walk + parse", repo_id):
+            tree = self._walker.walk(repo_dir, repo_id=repo_id)
+
+        with _timed("framework detect", repo_id):
+            detected = detect_frameworks(tree, self._library)
+            effective = tuple(compose(fw, None) for fw in detected)
+            logger.info(
+                "testparser[%s]: detected frameworks=%s",
+                repo_id, sorted({fw.name for fw in detected}),
+            )
         ctx = ResolverContext(
             tree=tree, frameworks=effective, repo_id=repo_id, languages=self._languages
         )
@@ -138,97 +167,144 @@ class TestParserAdapter(IngestionAdapter):
 
         # 2. Code structure artifacts (functions/classes/methods) — keyed by
         #    paths relative to the repo root so they match coverage lookups.
-        function_artifacts = [
-            self._rebase(artifact, repo_root_abs) for artifact in self._function_resolver.resolve(ctx)
-        ]
+        with _timed("function_resolver", repo_id):
+            function_artifacts = [
+                self._rebase(artifact, repo_root_abs)
+                for artifact in self._function_resolver.resolve(ctx)
+            ]
+            logger.info(
+                "testparser[%s]: function_resolver -> %d artifacts",
+                repo_id, len(function_artifacts),
+            )
 
         # 2b. Resolve function→function calls. The resolver returns updated
         #     artifacts with `calls` populated; we feed those forward.
-        call_resolution = self._function_call_resolver.resolve(
-            tree=tree,
-            artifacts=function_artifacts,
-            repo_root=repo_root_abs,
-            languages=self._languages,
-        )
-        function_artifacts = call_resolution.artifacts
+        with _timed("function_call_resolver", repo_id):
+            call_resolution = self._function_call_resolver.resolve(
+                tree=tree,
+                artifacts=function_artifacts,
+                repo_root=repo_root_abs,
+                languages=self._languages,
+            )
+            function_artifacts = call_resolution.artifacts
+            logger.info(
+                "testparser[%s]: function_call_resolver -> %d CALLS edges",
+                repo_id, len(call_resolution.edges),
+            )
         result.artifacts.extend(function_artifacts)
 
         # 3. Endpoint records — now a first-class node type. We look up the
         #    handler function artifact by (file, name) so the loader can wire
         #    the (Endpoint)-[:HANDLED_BY]->(CodeArtifact) edge.
-        handler_index = {(a.file, a.name): a.id for a in function_artifacts}
-        endpoints: list[Endpoint] = []
-        for endpoint in self._endpoint_resolver.resolve(ctx):
-            handler_rel = _make_relative(endpoint.handler_file, repo_root_abs)
-            handler_artifact_id = handler_index.get((handler_rel, endpoint.handler_symbol))
-            endpoints.append(
-                Endpoint(
-                    id=f"endpoint:{repo_id}:{endpoint.method}:{endpoint.full_path}",
-                    repoId=repo_id,
-                    method=endpoint.method,
-                    path=endpoint.full_path,
-                    framework=endpoint.framework or "unknown",
-                    handlerArtifactId=handler_artifact_id,
-                    handlerFile=handler_rel,
-                    handlerSymbol=endpoint.handler_symbol,
-                    isPublic=True,
-                    producedBy="endpoint_resolver",
-                    fromFacts=endpoint.derivation,
+        with _timed("endpoint_resolver", repo_id):
+            handler_index = {(a.file, a.name): a.id for a in function_artifacts}
+            endpoints: list[Endpoint] = []
+            for endpoint in self._endpoint_resolver.resolve(ctx):
+                handler_rel = _make_relative(endpoint.handler_file, repo_root_abs)
+                handler_artifact_id = handler_index.get((handler_rel, endpoint.handler_symbol))
+                endpoints.append(
+                    Endpoint(
+                        id=f"endpoint:{repo_id}:{endpoint.method}:{endpoint.full_path}",
+                        repoId=repo_id,
+                        method=endpoint.method,
+                        path=endpoint.full_path,
+                        framework=endpoint.framework or "unknown",
+                        handlerArtifactId=handler_artifact_id,
+                        handlerFile=handler_rel,
+                        handlerSymbol=endpoint.handler_symbol,
+                        isPublic=True,
+                        producedBy="endpoint_resolver",
+                        fromFacts=endpoint.derivation,
+                    )
                 )
+            logger.info(
+                "testparser[%s]: endpoint_resolver -> %d endpoints",
+                repo_id, len(endpoints),
             )
         result.endpoints.extend(endpoints)
 
         # 4. Tests.
-        tests = self._test_resolver.resolve(ctx)
-        # Rewrite test file paths to repo-relative for stable IDs across runs.
-        tests = [self._rebase_test(t, repo_root_abs, repo_id) for t in tests]
+        with _timed("test_resolver", repo_id):
+            tests = self._test_resolver.resolve(ctx)
+            # Rewrite test file paths to repo-relative for stable IDs across runs.
+            tests = [self._rebase_test(t, repo_root_abs, repo_id) for t in tests]
+            logger.info(
+                "testparser[%s]: test_resolver -> %d tests",
+                repo_id, len(tests),
+            )
 
         # 5. Coverage edges — link tests to function artifacts via the test
         #    file's imports. Endpoints are excluded by design: tests import
         #    handler functions by name, not URL paths.
-        coverage = self._coverage_resolver.resolve(
-            tree=tree,
-            tests=tests,
-            artifacts=function_artifacts,
-            repo_root=repo_root_abs,
-            languages=self._languages,
-        )
+        with _timed("coverage_resolver", repo_id):
+            coverage = self._coverage_resolver.resolve(
+                tree=tree,
+                tests=tests,
+                artifacts=function_artifacts,
+                repo_root=repo_root_abs,
+                languages=self._languages,
+            )
+            logger.info(
+                "testparser[%s]: coverage_resolver -> %d COVERS edges",
+                repo_id, len(coverage.edges),
+            )
         result.tests.extend(coverage.tests)
 
         # 6. Mocks — turn @patch / @patch.object decorators into Mock records,
         #    resolving target strings against the function artifact index.
-        mock_resolution = self._mock_resolver.resolve(
-            tree=tree,
-            tests=coverage.tests,
-            artifacts=function_artifacts,
-            frameworks=effective,
-            repo_id=repo_id,
-            repo_root=repo_root_abs,
-            languages=self._languages,
-        )
+        with _timed("mock_resolver", repo_id):
+            mock_resolution = self._mock_resolver.resolve(
+                tree=tree,
+                tests=coverage.tests,
+                artifacts=function_artifacts,
+                frameworks=effective,
+                repo_id=repo_id,
+                repo_root=repo_root_abs,
+                languages=self._languages,
+            )
+            logger.info(
+                "testparser[%s]: mock_resolver -> %d mocks",
+                repo_id, len(mock_resolution.mocks),
+            )
         result.mocks.extend(mock_resolution.mocks)
 
         # 7. Data models — pydantic / sqlalchemy / dataclass classes, driven
         #    by per-framework data_models YAML patterns.
-        dm_resolution = self._data_model_resolver.resolve(
-            tree=tree, frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
-        )
+        with _timed("data_model_resolver", repo_id):
+            dm_resolution = self._data_model_resolver.resolve(
+                tree=tree, frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
+            )
+            logger.info(
+                "testparser[%s]: data_model_resolver -> %d data_models",
+                repo_id, len(dm_resolution.data_models),
+            )
         result.data_models.extend(dm_resolution.data_models)
 
         # 8. Queries — raw SQL + ORM call sites attributed to their
         #    enclosing function for EXECUTES edges.
-        query_resolution = self._query_resolver.resolve(
-            tree=tree, artifacts=function_artifacts,
-            frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
-        )
+        with _timed("query_resolver", repo_id):
+            query_resolution = self._query_resolver.resolve(
+                tree=tree, artifacts=function_artifacts,
+                frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
+            )
+            logger.info(
+                "testparser[%s]: query_resolver -> %d queries",
+                repo_id, len(query_resolution.queries),
+            )
         result.queries.extend(query_resolution.queries)
 
         # 9. Kafka — producer/consumer call sites; topics are global join
         #    keys that stitch cross-repo PRODUCES/CONSUMES edges.
-        kafka_resolution = self._kafka_resolver.resolve(
-            tree=tree, artifacts=function_artifacts,
-            frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
-        )
+        with _timed("kafka_resolver", repo_id):
+            kafka_resolution = self._kafka_resolver.resolve(
+                tree=tree, artifacts=function_artifacts,
+                frameworks=effective, repo_id=repo_id, repo_root=repo_root_abs,
+            )
+            logger.info(
+                "testparser[%s]: kafka_resolver -> %d topics, %d producers, %d consumers",
+                repo_id, len(kafka_resolution.topics),
+                len(kafka_resolution.producers), len(kafka_resolution.consumers),
+            )
         result.kafka_topics.extend(kafka_resolution.topics)
         result.kafka_producers.extend(kafka_resolution.producers)
         result.kafka_consumers.extend(kafka_resolution.consumers)
@@ -236,10 +312,20 @@ class TestParserAdapter(IngestionAdapter):
         # 10. Config bindings — turn CONFIG_VALUE facts that look like
         #     URLs/hostnames into ExternalConnection records. Cheaper
         #     deterministic counterpart to Datadog.
-        cfg = self._config_binding_resolver.resolve(
-            tree=tree, repo_id=repo_id, source_service_id=service.id, now=context.now,
-        )
+        with _timed("config_binding_resolver", repo_id):
+            cfg = self._config_binding_resolver.resolve(
+                tree=tree, repo_id=repo_id, source_service_id=service.id, now=context.now,
+            )
+            logger.info(
+                "testparser[%s]: config_binding_resolver -> %d connections",
+                repo_id, len(cfg.connections),
+            )
         result.connections.extend(cfg.connections)
+
+        logger.info(
+            "testparser[%s]: repo extraction done in %.2fs",
+            repo_id, time.monotonic() - repo_started,
+        )
 
     def _build_service(
         self,

@@ -322,9 +322,16 @@ class GraphLoader:
             f"SET n += row"
         )
         written = 0
-        for batch in _chunks(rows, _BATCH_SIZE):
+        n_batches = (len(rows) + _BATCH_SIZE - 1) // _BATCH_SIZE
+        for i, batch in enumerate(_chunks(rows, _BATCH_SIZE), start=1):
             session.run(cypher, batch=batch).consume()
             written += len(batch)
+            if n_batches > 1:
+                logger.info(
+                    "loader: %s nodes batch %d/%d (%d so far)",
+                    label, i, n_batches, written,
+                )
+        logger.info("loader: %s -> %d nodes", label, written)
         return written
 
     def _merge_edges(
@@ -352,7 +359,8 @@ class GraphLoader:
             "    r.confidence = coalesce(row.confidence, $default_confidence)"
         )
         written = 0
-        for batch in _chunks(rows, _BATCH_SIZE):
+        n_batches = (len(rows) + _BATCH_SIZE - 1) // _BATCH_SIZE
+        for i, batch in enumerate(_chunks(rows, _BATCH_SIZE), start=1):
             session.run(
                 cypher,
                 batch=batch,
@@ -360,6 +368,15 @@ class GraphLoader:
                 default_confidence=_RESOLVER_CONFIDENCE,
             ).consume()
             written += len(batch)
+            if n_batches > 1:
+                logger.info(
+                    "loader: (%s)-[:%s]->(%s) batch %d/%d (%d so far)",
+                    src_label, rel, dst_label, i, n_batches, written,
+                )
+        logger.info(
+            "loader: (%s)-[:%s]->(%s) -> %d edges",
+            src_label, rel, dst_label, written,
+        )
         return written
 
 

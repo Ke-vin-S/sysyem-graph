@@ -39,11 +39,19 @@ never raises.
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 from typing import Any
 
 from core.facts import Fact, FactKind
 from ingestion.grammars.grammar import Grammar
+
+logger = logging.getLogger(__name__)
+
+# Anything taking longer than this to extract is worth flagging — usually a
+# huge generated file we should be skipping at the walker level instead.
+_SLOW_FILE_SECONDS = 0.5
 
 
 _PARAM_KIND_BY_NODE_TYPE: dict[str, str] = {
@@ -71,15 +79,28 @@ class TreeSitterPythonGrammar(Grammar):
         self._parser = Parser(self._language)
 
     def extract(self, file: Path, content: str, *, repo_id: str) -> list[Fact]:
+        started = time.monotonic()
         try:
             tree = self._parser.parse(bytes(content, "utf-8"))
-        except Exception:
+        except Exception as exc:
+            logger.warning("ts-python: parse raised on %s: %s", file, exc)
             return []
         if tree.root_node is None:
+            logger.warning("ts-python: empty parse tree for %s", file)
             return []
+        if tree.root_node.has_error:
+            # Tree-sitter still gives a tree with ERROR nodes — we extract
+            # what we can and warn so a big repo's noisy files are visible.
+            logger.warning("ts-python: parse contains ERROR nodes in %s", file)
         ctx = _Ctx(file=str(file), repo_id=repo_id, source_bytes=bytes(content, "utf-8"))
         facts: list[Fact] = []
         self._walk_block(tree.root_node, facts, ctx, enclosing_class="", enclosing_fn="")
+        elapsed = time.monotonic() - started
+        if elapsed >= _SLOW_FILE_SECONDS:
+            logger.info(
+                "ts-python: slow file %.2fs %s (%d facts)",
+                elapsed, file, len(facts),
+            )
         return facts
 
     # ------------------------------------------------------------------
