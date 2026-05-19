@@ -21,7 +21,48 @@ Later phases (Neo4j loader, impact rules, test selector, API, webhook, dashboard
 
 ## Quick start
 
-### With `make` (Linux / macOS)
+The recommended path is the **containerized dev environment** — same Linux
+toolchain everywhere, so resolvers that depend on path / filesystem
+semantics produce identical output on Linux, macOS, and Windows hosts.
+
+### Containerized (recommended — Linux / macOS / Windows)
+
+Prerequisites: Docker Desktop or Podman 4.4+ (with `podman compose`).
+
+```bash
+# One-time: build the dev image (~2 min, cached after that).
+docker compose --profile dev build dev
+
+# Run the tests.
+docker compose --profile dev run --rm dev pytest
+
+# Drop into a shell — sg-ingest / sg-graph are on the PATH inside.
+docker compose --profile dev run --rm dev bash
+```
+
+On Windows / Podman, swap `docker compose` for `podman compose`:
+
+```powershell
+podman compose --profile dev build dev
+podman compose --profile dev run --rm dev pytest
+```
+
+Neo4j is in the same compose file; the dev container talks to it on
+`bolt://neo4j:7687` (service name, not localhost). It's brought up
+automatically as a dependency.
+
+`make` shortcuts (work with both runtimes — override `COMPOSE` for Podman):
+
+```bash
+make docker-build                          # docker compose path
+make COMPOSE="podman compose" docker-test  # podman path
+make docker-shell                          # interactive shell
+make docker-ingest                         # ingest ./data into Neo4j
+```
+
+### Host venv (Linux / macOS, with `make`)
+
+If you'd rather not use containers and have `make` + Python 3.10+:
 
 ```bash
 make dev              # create .venv and install runtime + dev deps
@@ -30,7 +71,7 @@ make neo4j-up         # boot Neo4j locally on bolt://localhost:7687
 make test             # run pytest
 ```
 
-### Without `make` (Linux / macOS shells)
+### Host venv (Linux / macOS, no `make`)
 
 ```bash
 python3 -m venv .venv
@@ -42,19 +83,26 @@ docker compose up -d neo4j                        # or: podman compose up -d neo
 .venv/bin/pytest                                  # run tests
 ```
 
-### Windows (PowerShell)
+### Host venv (Windows)
+
+> Windows is supported but not the primary dev target. Use the
+> **containerized path above** unless you have a specific reason to run
+> on Windows directly — path-separator semantics in some resolvers can
+> produce divergent results.
+
+PowerShell:
 
 ```powershell
 py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\pip.exe install -r requirements.txt -r requirements-dev.txt
 .venv\Scripts\pip.exe install -e .
-Copy-Item .env.example .env                       # then edit and fill in keys
+Copy-Item .env.example .env
 docker compose up -d neo4j
 .venv\Scripts\pytest.exe
 ```
 
-### Windows (cmd.exe)
+cmd.exe:
 
 ```cmd
 py -3 -m venv .venv
@@ -66,7 +114,7 @@ docker compose up -d neo4j
 .venv\Scripts\pytest
 ```
 
-> **Path conventions below**: examples use `.venv/bin/<tool>` (Linux/macOS). On Windows substitute `.venv\Scripts\<tool>.exe`, or activate the venv first (`.venv\Scripts\Activate.ps1` in PowerShell) and drop the prefix entirely.
+> **Path conventions below**: examples use `.venv/bin/<tool>` (host venv on Linux/macOS). Inside the dev container the tools are on `PATH` — drop the prefix entirely. On Windows host substitute `.venv\Scripts\<tool>.exe`, or activate the venv first.
 
 Tests that hit external services (Datadog, GitHub, Neo4j) are marked `@pytest.mark.integration` and are skipped unless credentials are set.
 
@@ -76,9 +124,15 @@ Two CLIs ship in the venv: `sg-ingest` (read sources → JSON in `./out/`)
 and `sg-graph` (manage Neo4j: init schema, load JSON, query). Both use
 settings from `.env`. Replace the `< >` placeholders below.
 
-Windows users: substitute every `.venv/bin/<tool>` with
-`.venv\Scripts\<tool>.exe`, or activate the venv once
-(`.venv\Scripts\Activate.ps1` in PowerShell) and drop the prefix.
+**Command prefixes by environment:**
+
+| Environment | How to invoke |
+|---|---|
+| Container (recommended) | `docker compose --profile dev run --rm dev <cmd>` (or `podman compose ...`) — both CLIs on `PATH` |
+| Host venv (Linux/macOS) | `.venv/bin/<tool>` |
+| Host venv (Windows PS) | `.venv\Scripts\<tool>.exe` |
+
+Examples below use `.venv/bin/<tool>`; translate as needed.
 
 ### 1. Ingest one or more repos
 

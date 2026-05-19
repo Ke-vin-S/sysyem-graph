@@ -25,7 +25,52 @@ services:
       timeout: 5s
       retries: 10
 
+  # Dev container: identical Linux env on every host. Built lazily on
+  # first `docker compose run --rm dev …` (or `podman compose ...`).
+  # Source is bind-mounted, so host edits take effect immediately.
+  #
+  # Tucked behind the `dev` profile so plain `docker compose up neo4j`
+  # doesn't try to build this image.
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: system-graph-dev:latest
+    profiles: ["dev"]
+    working_dir: /workspace
+    volumes:
+      # `:Z` relabels the bind mount for SELinux (Fedora / RHEL hosts).
+      # It's a no-op on non-SELinux Linux and on Docker Desktop, so safe
+      # to keep everywhere.
+      - .:/workspace:Z
+      - pip-cache:/root/.cache/pip
+    environment:
+      # Inside the compose network, Neo4j is reachable by service name —
+      # not localhost. Override these via `.env` if you need different
+      # creds in the container than your host's.
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-password}
+      NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+      # Plumb through dev-relevant env without forcing it. Empty strings
+      # are fine; the adapters short-circuit when keys aren't set.
+      DD_API_KEY: ${DD_API_KEY:-}
+      DD_APP_KEY: ${DD_APP_KEY:-}
+      DD_SITE: ${DD_SITE:-datadoghq.com}
+      DD_ENV: ${DD_ENV:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TESTPARSER_ROOT: ${TESTPARSER_ROOT:-/workspace/data}
+    depends_on:
+      neo4j:
+        condition: service_started
+    # tty + stdin_open so `docker compose run --rm dev` gives a usable shell
+    # without needing -it flags.
+    tty: true
+    stdin_open: true
+
 volumes:
   neo4j-data:
   neo4j-logs:
   neo4j-plugins:
+  pip-cache:

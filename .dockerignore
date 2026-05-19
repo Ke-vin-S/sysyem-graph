@@ -1,0 +1,43 @@
+# Heavy + irrelevant; we only need source + manifests for the dev image build.
+.git
+.venv
+venv
+build
+dist
+*.egg-info
+.eggs
+
+__pycache__
+*.py[cod]
+*.so
+
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+.coverage.*
+htmlcov
+
+# Vendor fixtures: bind-mounted at runtime, don't bake them in.
+data/
+out/
+artifacts/
+neo4j-data/
+neo4j-logs/
+neo4j-import/
+neo4j-plugins/
+
+# Local config — must come in via env vars or compose, never the image.
+.env
+.env.*
+
+# IDE noise.
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Local scratch.
+querrr
+/tmp/

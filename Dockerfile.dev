@@ -1,0 +1,41 @@
+# Development image: gives every contributor the same Linux toolchain
+# regardless of host OS, so resolvers that depend on path/filesystem
+# semantics produce byte-identical output everywhere.
+#
+# Designed to be used via `docker compose run --rm dev <cmd>` (or the
+# `podman compose` equivalent). The source tree is bind-mounted at
+# /workspace at run time; only the dependency layer is baked in.
+
+FROM python:3.14-slim
+
+# Build deps for any native wheels (tree-sitter compiles a small C ext).
+# git is occasionally needed by pip when a transitive dep ships a VCS URL.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc \
+        git \
+        make \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=0 \
+    PYTHONPATH=/workspace
+
+WORKDIR /workspace
+
+# Install dependencies first so the layer cache survives source edits.
+COPY requirements.txt requirements-dev.txt pyproject.toml ./
+RUN pip install --upgrade pip \
+    && pip install -r requirements.txt -r requirements-dev.txt
+
+# Copy the source once so `pip install -e .` can register the egg-link
+# and console scripts (sg-ingest, sg-graph) in /usr/local/bin. At run
+# time the bind-mount overlays /workspace; the egg-link points at the
+# same path, so the mounted source takes effect immediately.
+COPY core ./core
+COPY ingestion ./ingestion
+RUN pip install --no-deps -e .
+
+CMD ["bash"]
