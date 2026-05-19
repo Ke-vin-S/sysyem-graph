@@ -68,7 +68,14 @@ class TestParserSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TESTPARSER_", env_file=".env", extra="ignore")
 
     root: Path = Path("./examples/test_project")
-    """Local filesystem path containing checked-out repos to scan."""
+    """Local filesystem path. Default interpretation: if `root` itself looks
+    like a repository (contains .git / pyproject.toml / package.json / etc.)
+    it IS the single service. Otherwise its subdirectories are treated as
+    individual repos. Override with `TESTPARSER_SINGLE_REPO=true|false`."""
+
+    single_repo: bool | None = None
+    """Force single-repo mode (`true`) or parent-of-repos mode (`false`).
+    `None` (default) = auto-detect from repo markers at the root."""
 
 
 class Settings(BaseSettings):

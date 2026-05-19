@@ -391,6 +391,19 @@ class TestParserAdapter(IngestionAdapter):
     def _discover_repos(self, root: Path, repos_filter: tuple[str, ...]) -> list[Path]:
         if not root.is_dir():
             return [root]
+
+        # Single-repo mode: the root itself IS the service. Either the
+        # operator forced it via TESTPARSER_SINGLE_REPO=true, or auto-
+        # detection found repo-shaped markers at the root.
+        single_repo = self._config.single_repo
+        if single_repo is None:
+            single_repo = _looks_like_repo(root)
+        if single_repo:
+            if repos_filter and root.name not in set(repos_filter):
+                return []
+            return [root]
+
+        # Parent-of-repos mode: each subdirectory is its own service.
         candidates = [
             p
             for p in sorted(root.iterdir())
@@ -400,6 +413,33 @@ class TestParserAdapter(IngestionAdapter):
             allowed = set(repos_filter)
             candidates = [p for p in candidates if p.name in allowed]
         return candidates or [root]
+
+
+# Files / directories that, when present at a path's root, strongly suggest
+# that path IS a single repository (rather than a parent directory holding
+# several repos). The set is conservative — we'd rather miss the auto-detect
+# and have the operator pass TESTPARSER_SINGLE_REPO=true than falsely treat
+# a monorepo of services as one mega-service.
+_REPO_MARKERS = (
+    ".git",            # most reliable signal; works for both dirs and worktree files
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "package.json",
+    "Cargo.toml",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+)
+
+
+def _looks_like_repo(path: Path) -> bool:
+    """True when `path` itself looks like a repo root."""
+    for marker in _REPO_MARKERS:
+        if (path / marker).exists():
+            return True
+    return False
 
 
 def _make_relative(file: str, repo_root_abs: str) -> str:

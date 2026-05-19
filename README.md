@@ -136,8 +136,20 @@ Examples below use `.venv/bin/<tool>`; translate as needed.
 
 ### 1. Ingest one or more repos
 
-`testparser` treats every subdirectory of `TESTPARSER_ROOT` as a separate
-repo. Point it at a *parent* dir, not a single repo.
+`testparser` auto-detects whether `TESTPARSER_ROOT` is a **single repo**
+or a **parent of repos**:
+
+* If the path contains repo markers (`.git`, `pyproject.toml`,
+  `setup.py`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
+  `build.gradle`) at the top level, **that path IS the service**. Its
+  `repo_id` is the folder's own name.
+* Otherwise its immediate subdirectories are scanned as separate repos
+  (the original mode — useful for monorepo-style layouts and the
+  bundled `./data/` fixture).
+
+Override the auto-detect with `TESTPARSER_SINGLE_REPO=true|false` if
+the heuristic guesses wrong (e.g. a monorepo whose root carries a
+top-level `pyproject.toml`).
 
 **Linux / macOS:**
 ```bash
@@ -161,22 +173,15 @@ set TESTPARSER_ROOT=<parent-dir-of-repos>
 .venv\Scripts\sg-ingest --out .\out --skip datadog --skip github
 ```
 
-To ingest a single repo that doesn't live inside a parent dir, symlink
-(Linux/macOS) or create a junction (Windows) under a wrapper:
+Point directly at a single repo:
 
 ```bash
-# Linux/macOS
-mkdir -p /tmp/sg-in && ln -sfn <absolute-repo-path> /tmp/sg-in/<repo-id>
-TESTPARSER_ROOT=/tmp/sg-in .venv/bin/sg-ingest --out ./out --skip datadog --skip github
+TESTPARSER_ROOT=<absolute-repo-path> .venv/bin/sg-ingest --out ./out \
+    --skip datadog --skip github
 ```
 
-```powershell
-# Windows PowerShell (junctions don't need admin)
-New-Item -ItemType Directory -Force $env:TEMP\sg-in
-New-Item -ItemType Junction -Path "$env:TEMP\sg-in\<repo-id>" -Target "<absolute-repo-path>"
-$env:TESTPARSER_ROOT = "$env:TEMP\sg-in"
-.venv\Scripts\sg-ingest.exe --out .\out --skip datadog --skip github
-```
+(Old workflow needed a wrapper directory + symlink to make a single repo
+look like a parent-of-repos; that's no longer required.)
 
 Output lands in `./out/{services,artifacts,endpoints,data_models,queries,
 kafka_topics,kafka_producers,kafka_consumers,mocks,tests,connections,
@@ -254,18 +259,18 @@ directly. See the next section for ready-to-paste queries.
 
 ### 5. Self-ingest (the system analyzing itself)
 
+The project has a `pyproject.toml` at its root, so auto-detect treats
+it as a single repo named after the directory.
+
 ```bash
 # Linux/macOS
-mkdir -p /tmp/sg-self && ln -sfn "$(pwd)" /tmp/sg-self/system-graph
-TESTPARSER_ROOT=/tmp/sg-self .venv/bin/sg-ingest --out ./out --skip datadog --skip github
+TESTPARSER_ROOT="$(pwd)" .venv/bin/sg-ingest --out ./out --skip datadog --skip github
 .venv/bin/sg-graph clear --yes && .venv/bin/sg-graph load --from ./out
 ```
 
 ```powershell
 # Windows PowerShell
-New-Item -ItemType Directory -Force $env:TEMP\sg-self
-New-Item -ItemType Junction -Path "$env:TEMP\sg-self\system-graph" -Target "$pwd"
-$env:TESTPARSER_ROOT = "$env:TEMP\sg-self"
+$env:TESTPARSER_ROOT = "$pwd"
 .venv\Scripts\sg-ingest.exe --out .\out --skip datadog --skip github
 .venv\Scripts\sg-graph.exe clear --yes
 .venv\Scripts\sg-graph.exe load --from .\out

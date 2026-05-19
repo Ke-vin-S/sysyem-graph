@@ -11,7 +11,14 @@ from core.config import TestParserSettings
 @dataclass
 class TestParserAdapterConfig:
     root: Path
-    """Filesystem path containing one or more checked-out repos as subdirectories."""
+    """Filesystem path. Treated either as a single repository (when it
+    contains repo markers like `.git`, `pyproject.toml`, `package.json`,
+    or when `single_repo=True`) or as a parent directory whose
+    subdirectories are individual repos (the legacy default)."""
+
+    single_repo: bool | None = None
+    """`True` → root IS the service. `False` → walk subdirectories.
+    `None` → auto-detect from repo markers at the root."""
 
     repo_id_strategy: str = "dirname"
     """How to derive a repo_id for tests. 'dirname' = top-level subdirectory name."""
@@ -36,4 +43,7 @@ class TestParserAdapterConfig:
 
     @classmethod
     def from_settings(cls, settings: TestParserSettings) -> "TestParserAdapterConfig":
-        return cls(root=settings.root.resolve())
+        return cls(
+            root=settings.root.resolve(),
+            single_repo=settings.single_repo,
+        )
