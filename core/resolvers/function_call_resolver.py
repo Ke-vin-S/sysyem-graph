@@ -93,6 +93,11 @@ class FunctionCallResolver:
         languages: LanguageLibrary | None = None,
     ) -> CallResolution:
         artifacts_list = list(artifacts)
+        # Walk IMPORT facts once and bucket by normalized file so per-call
+        # lookups are O(1) instead of O(N_imports). Without this, every
+        # CALL fact triggered a full IMPORT-fact scan, which on real repos
+        # turned function_call_resolver into the dominant cost.
+        self._file_imports_by_file = self._build_file_imports_by_file(tree, repo_root)
         # Index by file → sorted list of (start, end, artifact) for enclosing lookup.
         by_file_ranges: dict[str, list[tuple[int, int, CodeArtifact]]] = {}
         # Index by (file, name) for callee lookup.
@@ -121,6 +126,11 @@ class FunctionCallResolver:
         # (file, name) -> type for module-level `var = SomeClass(...)`.
         # Lets `db = Database(); db.query()` resolve to `Database.query`.
         module_var_types = self._build_module_var_types(tree, repo_root)
+        # (file, alias_name) -> [dep_func_name, ...] from module-level type
+        # aliases of the form `X = Annotated[T, Depends(fn)]`. Captures the
+        # FastAPI Annotated DI pattern where Depends is hidden inside a
+        # type subscript and thus has no enclosing-function caller.
+        alias_dependencies = self._build_alias_dependencies(tree, repo_root)
 
         # Per-artifact callee accumulator (preserve insertion order).
         callees: dict[str, list[str]] = {a.id: [] for a in artifacts_list}
@@ -178,6 +188,27 @@ class FunctionCallResolver:
                 )
             )
 
+        # Post-loop: emit `function -> dep_fn` edges for every function whose
+        # typed parameter is an Annotated[T, Depends(fn)] alias. The Depends
+        # call has no enclosing artifact (it lives at module scope inside a
+        # type subscript), so the main loop above can't link it; this pass
+        # restores those edges by matching param types against the alias
+        # dependency map.
+        if alias_dependencies:
+            self._emit_alias_dependency_edges(
+                artifacts_list=artifacts_list,
+                alias_dependencies=alias_dependencies,
+                params_by_artifact_id=params_by_artifact_id,
+                by_file_name=by_file_name,
+                callees=callees,
+                seen_pairs=seen_pairs,
+                edges=edges,
+                tree=tree,
+                repo_root=repo_root,
+                languages=languages,
+                alias_map=alias_map,
+            )
+
         updated = [
             art.model_copy(update={"calls": tuple(callees.get(art.id, ()))})
             if callees.get(art.id)
@@ -185,6 +216,180 @@ class FunctionCallResolver:
             for art in artifacts_list
         ]
         return CallResolution(artifacts=updated, edges=edges)
+
+    # ---- Annotated[T, Depends(fn)] alias dependency mapping -----------
+
+    def _build_alias_dependencies(
+        self,
+        tree: FactTree,
+        repo_root: str | None,
+    ) -> dict[tuple[str, str], list[str]]:
+        """`(file, alias_name) -> [dep_func_name, ...]` for type aliases of
+        the form `SessionDep = Annotated[Session, Depends(get_db)]`.
+
+        Approach: find module-level ASSIGNMENTs (the alias target) and
+        correlate each with the Depends CALL facts that sit on the same
+        (file, line). Both grammar emissions are already present — only
+        the linking is new. Captures Annotated[T, Depends(a), Depends(b)]
+        with multiple deps in one alias.
+        """
+        out: dict[tuple[str, str], list[str]] = {}
+        # Collect (file, line) -> alias_name for every module-level assignment
+        # whose RHS isn't trivially a call/name/literal — those simpler kinds
+        # never hide a Depends inside a type subscript.
+        alias_at: dict[tuple[str, int], str] = {}
+        for assign in tree.where(kind=FactKind.ASSIGNMENT):
+            if assign.data.get("scope") != "module":
+                continue
+            chain = list(assign.data.get("target_chain") or ())
+            if len(chain) != 1:
+                continue
+            # Don't restrict source_kind: even `Foo = Depends(bar)` at module
+            # scope (rare but legal) deserves an edge.
+            alias_at[(assign.file, assign.line)] = chain[0]
+        if not alias_at:
+            return out
+        for call in tree.where(kind=FactKind.CALL):
+            callee = str(call.data.get("callee", ""))
+            if callee != "Depends" and not callee.endswith(".Depends"):
+                continue
+            target = alias_at.get((call.file, call.line))
+            if not target:
+                continue
+            args = call.data.get("args") or []
+            if not args:
+                continue
+            first = args[0]
+            if not isinstance(first, str) or not first.startswith("<name:"):
+                continue
+            dep_name = first[len("<name:") : -1]
+            key_file = _rel_to(call.file, repo_root) if repo_root else call.file
+            out.setdefault((key_file, target), []).append(dep_name)
+        return out
+
+    def _emit_alias_dependency_edges(
+        self,
+        *,
+        artifacts_list: list[CodeArtifact],
+        alias_dependencies: dict[tuple[str, str], list[str]],
+        params_by_artifact_id: dict[str, dict[str, str]],
+        by_file_name: dict[tuple[str, str], CodeArtifact],
+        callees: dict[str, list[str]],
+        seen_pairs: set[tuple[str, str]],
+        edges: list[CallEdge],
+        tree: FactTree,
+        repo_root: str | None,
+        languages: LanguageLibrary | None,
+        alias_map: dict[tuple[str, str], list[tuple[str, str]]],
+    ) -> None:
+        for fn_art in artifacts_list:
+            if fn_art.type not in ("function", "method"):
+                continue
+            params = params_by_artifact_id.get(fn_art.id)
+            if not params:
+                continue
+            profile = self._profile_for(fn_art.file, languages)
+            file_imports = self._file_import_index(tree, fn_art.file, repo_root)
+            for _, param_type in params.items():
+                if not param_type:
+                    continue
+                lookup = self._lookup_alias_deps(
+                    type_name=param_type,
+                    caller_file=fn_art.file,
+                    profile=profile,
+                    file_imports=file_imports,
+                    alias_map=alias_map,
+                    alias_dependencies=alias_dependencies,
+                )
+                if lookup is None:
+                    continue
+                alias_source_file, deps = lookup
+                # Resolve dep names from the alias's source file — that's
+                # where the dep functions are imported/defined. The caller
+                # only sees the alias, never the dep names.
+                dep_profile = self._profile_for(alias_source_file, languages)
+                dep_imports = self._file_import_index(
+                    tree, alias_source_file, repo_root
+                )
+                for dep_name in deps:
+                    dep_art = self._resolve_named_target(
+                        name=dep_name,
+                        caller_file=alias_source_file,
+                        profile=dep_profile,
+                        file_imports=dep_imports,
+                        alias_map=alias_map,
+                        by_file_name=by_file_name,
+                    )
+                    if dep_art is None or dep_art.id == fn_art.id:
+                        continue
+                    pair = (fn_art.id, dep_art.id)
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    callees[fn_art.id].append(dep_art.id)
+                    edges.append(
+                        CallEdge(
+                            caller_id=fn_art.id,
+                            callee_id=dep_art.id,
+                            reason=f"annotated_dep via {param_type}",
+                        )
+                    )
+
+    def _lookup_alias_deps(
+        self,
+        *,
+        type_name: str,
+        caller_file: str,
+        profile: LanguageProfile,
+        file_imports: "_ImportIndex",
+        alias_map: dict[tuple[str, str], list[tuple[str, str]]],
+        alias_dependencies: dict[tuple[str, str], list[str]],
+    ) -> tuple[str, list[str]] | None:
+        """Return `(alias_source_file, dep_names)` for `type_name` used as a
+        parameter type in `caller_file`. The source file matters because
+        the dep functions (e.g. `get_db`) are typically defined in or
+        imported by that file — not by the caller — so a later resolution
+        of the dep name must search from the alias's perspective."""
+        deps = alias_dependencies.get((caller_file, type_name))
+        if deps:
+            return caller_file, deps
+        for module, name, _level in file_imports.from_names:
+            if name != type_name:
+                continue
+            for real_module, real_name in self._expand(module, type_name, alias_map):
+                for candidate_file in resolve_candidate_files(real_module, profile):
+                    found = alias_dependencies.get((candidate_file, real_name))
+                    if found:
+                        return candidate_file, found
+        return None
+
+    def _resolve_named_target(
+        self,
+        *,
+        name: str,
+        caller_file: str,
+        profile: LanguageProfile,
+        file_imports: "_ImportIndex",
+        alias_map: dict[tuple[str, str], list[tuple[str, str]]],
+        by_file_name: dict[tuple[str, str], CodeArtifact],
+    ) -> CodeArtifact | None:
+        """Resolve a bare function name (e.g. `get_db`) to its artifact.
+
+        Same algorithm as `_resolve_dependency_injection`'s bind logic;
+        factored so it's reusable both for `Depends(fn)` direct args and
+        for `Annotated[…, Depends(fn)]` aliases."""
+        target = by_file_name.get((caller_file, name))
+        if target is not None:
+            return target
+        for module, imp_name, _level in file_imports.from_names:
+            if imp_name != name:
+                continue
+            target = self._lookup_by_module(
+                module, name, profile, alias_map, by_file_name
+            )
+            if target is not None:
+                return target
+        return None
 
     # ---- call-target resolution ----------------------------------------
 
@@ -703,42 +908,56 @@ class FunctionCallResolver:
     def _file_import_index(
         self, tree: FactTree, file: str, repo_root: str | None
     ) -> "_ImportIndex":
-        """Walk this file's IMPORT facts, sort by import shape."""
-        bare_modules: list[str] = []
-        aliases: dict[str, str] = {}
-        from_names: list[tuple[str, str, int]] = []
+        """O(1) lookup into the precomputed per-file index built at the
+        start of `resolve()`. `tree` and `repo_root` are kept on the
+        signature for backwards compatibility with callers that still
+        pass them — they're ignored here."""
+        cache = getattr(self, "_file_imports_by_file", None)
+        if cache is None:
+            # Defensive: someone called this outside a `resolve()` scope.
+            # Fall back to building on demand (slow path, used by tests).
+            return self._build_file_imports_by_file(tree, repo_root).get(
+                file, _EMPTY_IMPORT_INDEX
+            )
+        return cache.get(file, _EMPTY_IMPORT_INDEX)
+
+    def _build_file_imports_by_file(
+        self, tree: FactTree, repo_root: str | None
+    ) -> dict[str, "_ImportIndex"]:
+        """One pass over IMPORT facts, bucketed by normalized file."""
+        bare: dict[str, list[str]] = {}
+        aliases: dict[str, dict[str, str]] = {}
+        from_names: dict[str, list[tuple[str, str, int]]] = {}
         for fact in tree.where(kind=FactKind.IMPORT):
             fact_file = fact.file
             if repo_root is not None:
                 fact_file = _rel_to(fact_file, repo_root)
-            if fact_file != file:
-                continue
             module = str(fact.data.get("module", ""))
             names = list(fact.data.get("names") or [])
             alias = str(fact.data.get("alias", "") or "")
             level = int(fact.data.get("level", 0) or 0)
             if names:
-                # `from MOD import a, b` — track each name.
+                bucket = from_names.setdefault(fact_file, [])
                 for n in names:
                     if n:
-                        from_names.append((module, n, level))
+                        bucket.append((module, n, level))
             elif alias:
-                # `import MOD as ALIAS`
-                aliases[alias] = module
+                aliases.setdefault(fact_file, {})[alias] = module
             else:
-                # `import MOD` — receiver match needs the full dotted module.
-                bare_modules.append(module)
-                # Allow head-of-path lookup too: `import a.b.c` → head "a".
+                bare.setdefault(fact_file, []).append(module)
                 head = module.split(".", 1)[0]
-                aliases.setdefault(head, head)
-        # Sort bare modules longest-first so `a.b.c` wins over `a` when both
-        # are imported in the same file.
-        bare_modules.sort(key=len, reverse=True)
-        return _ImportIndex(
-            bare_modules=tuple(bare_modules),
-            aliases=aliases,
-            from_names=tuple(from_names),
-        )
+                aliases.setdefault(fact_file, {}).setdefault(head, head)
+        out: dict[str, _ImportIndex] = {}
+        all_files = set(bare) | set(aliases) | set(from_names)
+        for f in all_files:
+            bm = bare.get(f, [])
+            bm.sort(key=len, reverse=True)
+            out[f] = _ImportIndex(
+                bare_modules=tuple(bm),
+                aliases=aliases.get(f, {}),
+                from_names=tuple(from_names.get(f, ())),
+            )
+        return out
 
     # ---- profile selection ---------------------------------------------
 
@@ -763,6 +982,9 @@ class _ImportIndex:
 
     from_names: tuple[tuple[str, str, int], ...]
     """`from M import N` — list of (module, name, level) tuples."""
+
+
+_EMPTY_IMPORT_INDEX = _ImportIndex(bare_modules=(), aliases={}, from_names=())
 
 
 def _enclosing_artifact(
