@@ -225,3 +225,171 @@ def u():
     # Three contributing facts: FastAPI(root_path) call, decorator, handler symbol.
     assert len(target.derivation) >= 2
     assert all(d.startswith("fact:") for d in target.derivation)
+
+
+# 10. Multi-hop chain: parent.include_router(child) + child.include_router(grand)
+#     The pattern that's everywhere in real FastAPI codebases (admin/api/v1/sys).
+def test_fastapi_multi_hop_include_chain(tmp_path: Path, library) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text(
+        """\
+from fastapi import FastAPI
+
+from app.api.router import v1
+
+app = FastAPI()
+app.include_router(v1)
+"""
+    )
+    (tmp_path / "app" / "api").mkdir()
+    (tmp_path / "app" / "api" / "__init__.py").write_text("")
+    (tmp_path / "app" / "api" / "router.py").write_text(
+        """\
+from fastapi import APIRouter
+
+from app.api.v1.sys import router as sys_router
+
+v1 = APIRouter(prefix="/api/v1")
+v1.include_router(sys_router)
+"""
+    )
+    (tmp_path / "app" / "api" / "v1").mkdir()
+    (tmp_path / "app" / "api" / "v1" / "__init__.py").write_text("")
+    (tmp_path / "app" / "api" / "v1" / "sys").mkdir()
+    (tmp_path / "app" / "api" / "v1" / "sys" / "__init__.py").write_text(
+        """\
+from fastapi import APIRouter
+
+from app.api.v1.sys.user import router as user_router
+
+router = APIRouter(prefix="/sys")
+router.include_router(user_router, prefix="/users", tags=["users"])
+"""
+    )
+    (tmp_path / "app" / "api" / "v1" / "sys" / "user.py").write_text(
+        """\
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.get("/{pk}")
+def get_user(pk):
+    return {}
+"""
+    )
+    endpoints = _resolve(tmp_path, library)
+    paths = sorted({(e.method, e.full_path) for e in endpoints})
+    assert ("GET", "/api/v1/sys/users/{pk}") in paths, paths
+
+
+# 11. Mid-chain prefix correctly composes when an intermediate router carries
+#     its own prefix AND the include_router call adds another.
+def test_fastapi_intermediate_own_prefix_plus_include_prefix(
+    tmp_path: Path, library
+) -> None:
+    (tmp_path / "main.py").write_text(
+        """\
+from fastapi import FastAPI
+
+from sub import router as sub_router
+
+app = FastAPI()
+app.include_router(sub_router, prefix="/outer")
+"""
+    )
+    (tmp_path / "sub.py").write_text(
+        """\
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/inner")
+
+
+@router.get("/{id}")
+def get_thing(id):
+    return {}
+"""
+    )
+    endpoints = _resolve(tmp_path, library)
+    # /outer (from include_router) + /inner (router's own prefix) + /{id}
+    target = next(
+        (e for e in endpoints if e.full_path == "/outer/inner/{id}"), None
+    )
+    assert target is not None, [(e.method, e.full_path) for e in endpoints]
+
+
+# 12. Aliased import: `from .user import router as user_router` is the
+#     fastapi-best-architecture pattern that broke the original resolver.
+def test_fastapi_alias_imported_child_router(tmp_path: Path, library) -> None:
+    (tmp_path / "main.py").write_text(
+        """\
+from fastapi import FastAPI
+
+from sub import router as user_router
+
+app = FastAPI()
+app.include_router(user_router, prefix="/users")
+"""
+    )
+    (tmp_path / "sub.py").write_text(
+        """\
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.get("/{pk}")
+def get_user(pk):
+    return {}
+"""
+    )
+    endpoints = _resolve(tmp_path, library)
+    target = next((e for e in endpoints if e.full_path == "/users/{pk}"), None)
+    assert target is not None, [(e.method, e.full_path) for e in endpoints]
+
+
+# 13. Disambiguation: two routers with the same `/{pk}` shape — multi-hop
+#     prefixes are what stop them from collapsing to one endpoint ID.
+def test_fastapi_disambiguates_two_routers_with_same_route(
+    tmp_path: Path, library
+) -> None:
+    (tmp_path / "main.py").write_text(
+        """\
+from fastapi import FastAPI
+
+from users import router as users_router
+from roles import router as roles_router
+
+app = FastAPI()
+app.include_router(users_router, prefix="/users")
+app.include_router(roles_router, prefix="/roles")
+"""
+    )
+    (tmp_path / "users.py").write_text(
+        """\
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.get("/{pk}")
+def get_user(pk):
+    return {}
+"""
+    )
+    (tmp_path / "roles.py").write_text(
+        """\
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.get("/{pk}")
+def get_role(pk):
+    return {}
+"""
+    )
+    endpoints = _resolve(tmp_path, library)
+    full = {(e.method, e.full_path) for e in endpoints}
+    assert ("GET", "/users/{pk}") in full, full
+    assert ("GET", "/roles/{pk}") in full, full

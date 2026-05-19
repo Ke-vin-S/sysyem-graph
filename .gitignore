@@ -38,3 +38,5 @@ neo4j-plugins/
 out/
 artifacts/
 .system-graph/
+/data/backend/
+/data/fastapi-best-architecture/
