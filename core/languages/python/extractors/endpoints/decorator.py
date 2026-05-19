@@ -465,15 +465,18 @@ def _resolve_module_to_file(module: str, files_in_tree: list[str]) -> str | None
 
     The IMPORT facts hold module names like `backend.app.admin.api.v1.sys.user`.
     `resolve_candidate_files` expands those to repo-relative templates
-    (`backend/app/admin/api/v1/sys/user.py` etc.). We then match against
-    the absolute paths in the tree by suffix.
+    using forward slashes (`backend/app/admin/api/v1/sys/user.py`). On
+    Windows, `files_in_tree` may contain backslash-separated absolute
+    paths — normalize both sides to forward slashes before suffix
+    matching so the comparison is platform-agnostic.
     """
     if not module:
         return None
     for candidate in resolve_candidate_files(module, _FALLBACK_PYTHON):
         suffix = "/" + candidate
         for f in files_in_tree:
-            if f.endswith(suffix) or f == candidate:
+            norm = f.replace("\\", "/")
+            if norm.endswith(suffix) or norm == candidate:
                 return f
     return None
 
