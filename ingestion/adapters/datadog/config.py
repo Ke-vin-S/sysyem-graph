@@ -30,6 +30,15 @@ class DatadogAdapterConfig:
     """Optional `env:<value>` Datadog tag filter (e.g. 'prod'). Empty = no filter.
     Keeps staging/dev traffic out of the production impact graph."""
 
+    spans_ttl_seconds: int = 300
+    """How long a `spans` fetch stays "fresh" — re-running `extract` within
+    this window reuses the staged spans instead of hitting the Datadog API
+    again. Default 5 minutes; bump higher to cache for the whole working
+    session, lower to fetch every run."""
+
+    store_path: str = "./out/datadog.db"
+    """On-disk SQLite path for the staging store. `:memory:` for tests."""
+
     @classmethod
     def from_settings(cls, settings: DatadogSettings) -> "DatadogAdapterConfig":
         if not settings.enabled:
@@ -41,4 +50,6 @@ class DatadogAdapterConfig:
             site=settings.site,
             lookback_hours=settings.trace_lookback_hours,
             env=settings.env,
+            spans_ttl_seconds=settings.spans_ttl_seconds,
+            store_path=settings.store_path,
         )

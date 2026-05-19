@@ -20,7 +20,15 @@ import typer
 from core.adapters import AdapterRegistry, IngestionContext
 from core.config import get_settings
 from core.types.errors import ConfigurationError
-from ingestion.adapters.datadog import DatadogAdapter, DatadogAdapterConfig
+from ingestion.adapters.datadog import (
+    DatadogAdapter,
+    DatadogAdapterConfig,
+    DatadogClient,
+    DatadogStore,
+)
+from ingestion.adapters.datadog.fetcher import DatadogFetcher
+from ingestion.adapters.datadog.parser import DatadogParser
+from ingestion.adapters.datadog.trace_parser import TraceParser
 from ingestion.adapters.github import GitHubAdapter, GitHubAdapterConfig
 from ingestion.adapters.testparser import TestParserAdapter, TestParserAdapterConfig
 
@@ -217,12 +225,148 @@ def datadog_preview(
             typer.secho(f"warning: {w}", fg=typer.colors.YELLOW)
 
 
+@app.command("datadog-fetch")
+def datadog_fetch(
+    lookback_hours: int = typer.Option(
+        0,
+        "--lookback-hours",
+        help="Override the configured lookback. 0 = use DD_TRACE_LOOKBACK_HOURS.",
+    ),
+    env: str = typer.Option("", "--env", help="Override DD_ENV for this fetch."),
+    force: bool = typer.Option(
+        False, "--force", help="Fetch even if the staged spans are still within their TTL."
+    ),
+) -> None:
+    """Pull Datadog spans into the staging store. No parsing, no JSON.
+
+    Use this to refresh the cache on its own — `datadog-parse` and `run`
+    will pick up the new spans next time they execute.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    if not settings.datadog.enabled:
+        typer.secho("datadog disabled: set DD_API_KEY and DD_APP_KEY.", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+    cfg = DatadogAdapterConfig.from_settings(settings.datadog)
+    if lookback_hours > 0:
+        cfg = _replace_cfg(cfg, lookback_hours=lookback_hours)
+    if env:
+        cfg = _replace_cfg(cfg, env=env)
+
+    store = DatadogStore(cfg.store_path)
+    if not force and not store.is_stale("spans", ttl_seconds=cfg.spans_ttl_seconds):
+        last = store.last_fetched_at("spans")
+        typer.echo(
+            f"spans cache fresh (last fetched {last.isoformat() if last else 'never'}); "
+            "use --force to refetch."
+        )
+        return
+
+    client = DatadogClient(api_key=cfg.api_key, app_key=cfg.app_key, site=cfg.site)
+    fetcher = DatadogFetcher(store, client)
+    adapter = DatadogAdapter(cfg, client=client, store=store, fetcher=fetcher)
+    query = adapter._build_query(IngestionContext())  # noqa: SLF001
+    typer.echo(f"fetching: lookback={cfg.lookback_hours}h env={cfg.env or '<all>'} query={query!r}")
+
+    count = fetcher.fetch_spans(
+        lookback_hours=cfg.lookback_hours,
+        query=query,
+        env=cfg.env,
+    )
+    typer.echo(f"wrote {count} spans to {cfg.store_path}")
+
+
+@app.command("datadog-parse")
+def datadog_parse(
+    out: Path = typer.Option(
+        Path("./out"), help="Where to write services.json + connections.json."
+    ),
+    lookback_hours: int = typer.Option(
+        0,
+        "--lookback-hours",
+        help="Window to parse over (default: DD_TRACE_LOOKBACK_HOURS).",
+    ),
+    env: str = typer.Option("", "--env", help="Filter parsed spans to this env tag."),
+) -> None:
+    """Parse staged spans into Service/ExternalConnection JSON. No network.
+
+    Reads from the same SQLite store `datadog-fetch` populated, so you
+    can iterate on parser logic without re-pulling spans.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    if not settings.datadog.enabled:
+        # Keys aren't strictly required for parsing — we never call the API —
+        # but config plumbing assumes them. Allow parse-only when store exists.
+        cfg = DatadogAdapterConfig(
+            api_key="",
+            app_key="",
+            site=settings.datadog.site,
+            lookback_hours=lookback_hours or settings.datadog.trace_lookback_hours,
+            env=env or settings.datadog.env,
+            store_path=settings.datadog.store_path,
+        )
+    else:
+        cfg = DatadogAdapterConfig.from_settings(settings.datadog)
+        if lookback_hours > 0:
+            cfg = _replace_cfg(cfg, lookback_hours=lookback_hours)
+        if env:
+            cfg = _replace_cfg(cfg, env=env)
+
+    store = DatadogStore(cfg.store_path)
+    if store.span_count() == 0:
+        typer.secho(
+            "no spans in store — run `sg-ingest datadog-fetch` first.",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=2)
+
+    trace_parser = TraceParser(
+        lookback_hours=cfg.lookback_hours, min_span_count=cfg.min_span_count
+    )
+    parser = DatadogParser(store, trace_parser)
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=cfg.lookback_hours)
+    result = parser.parse(since=since, env=cfg.env or None, now=now)
+
+    out.mkdir(parents=True, exist_ok=True)
+    _dump(out / "services.json", [s.model_dump(mode="json") for s in result.services])
+    _dump(out / "connections.json", [c.model_dump(mode="json") for c in result.connections])
+    typer.echo(
+        f"parsed: {result.spans_seen} spans -> "
+        f"{len(result.services)} services, {len(result.connections)} connections "
+        f"(skipped={result.spans_skipped})"
+    )
+
+
+def _replace_cfg(cfg: DatadogAdapterConfig, **kwargs: Any) -> DatadogAdapterConfig:
+    """Tiny helper so the CLI subcommands can layer overrides onto the
+    settings-derived config without re-writing field-by-field."""
+    return DatadogAdapterConfig(
+        api_key=kwargs.get("api_key", cfg.api_key),
+        app_key=kwargs.get("app_key", cfg.app_key),
+        site=kwargs.get("site", cfg.site),
+        lookback_hours=kwargs.get("lookback_hours", cfg.lookback_hours),
+        min_span_count=kwargs.get("min_span_count", cfg.min_span_count),
+        services_allowlist=kwargs.get("services_allowlist", cfg.services_allowlist),
+        env=kwargs.get("env", cfg.env),
+        spans_ttl_seconds=kwargs.get("spans_ttl_seconds", cfg.spans_ttl_seconds),
+        store_path=kwargs.get("store_path", cfg.store_path),
+    )
+
+
 def _register_adapters(
     registry: AdapterRegistry, settings: Any, skipped: set[str]
 ) -> None:
     if "datadog" not in skipped and settings.datadog.enabled:
         cfg = DatadogAdapterConfig.from_settings(settings.datadog)
-        registry.register(DatadogAdapter(cfg))
+        store = DatadogStore(cfg.store_path)
+        registry.register(DatadogAdapter(cfg, store=store))
     if "github" not in skipped and settings.github.enabled and settings.github.repos:
         cfg = GitHubAdapterConfig.from_settings(settings.github)
         registry.register(GitHubAdapter(cfg))

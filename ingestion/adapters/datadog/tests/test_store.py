@@ -7,9 +7,37 @@ from pathlib import Path
 
 import pytest
 
+from ingestion.adapters.datadog.client import RawSpan
 from ingestion.adapters.datadog.store import DatadogStore, latest_migration_version
 
 NOW = datetime(2026, 5, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _span(
+    *,
+    trace_id: str = "t1",
+    span_id: str = "s1",
+    parent_id: str | None = None,
+    service: str = "auth",
+    resource: str = "POST /charges",
+    span_type: str = "http",
+    start: datetime | None = None,
+    tags: dict[str, str] | None = None,
+    error: bool = False,
+) -> RawSpan:
+    return RawSpan(
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_id=parent_id,
+        service=service,
+        resource=resource,
+        operation=f"{span_type}.request",
+        type=span_type,
+        start=start or NOW,
+        duration_ms=12.0,
+        error=error,
+        tags=tags or {},
+    )
 
 
 # ---- migration runner ------------------------------------------------------
@@ -184,3 +212,90 @@ def test_context_manager_closes_connection() -> None:
     # After __exit__, further operations should raise (connection closed).
     with pytest.raises(Exception):  # noqa: BLE001
         store.record_fetch(api="spans")
+
+
+# ---- spans round-trip ------------------------------------------------------
+
+
+def test_insert_spans_round_trip() -> None:
+    with DatadogStore(":memory:") as store:
+        spans_in = [
+            _span(trace_id="t1", span_id="a", service="auth", tags={"peer.service": "payment"}),
+            _span(trace_id="t1", span_id="b", parent_id="a", service="payment"),
+        ]
+        wrote = store.insert_spans(spans_in, env="prod", fetched_at=NOW)
+        assert wrote == 2
+        assert store.span_count() == 2
+
+        out = list(store.read_spans())
+        assert len(out) == 2
+        # Tags survive the JSON round-trip.
+        assert out[0].tags == {"peer.service": "payment"}
+        # parent_id preserved.
+        b = next(s for s in out if s.span_id == "b")
+        assert b.parent_id == "a"
+
+
+def test_insert_spans_idempotent_on_replay() -> None:
+    """Re-inserting the same (trace_id, span_id) overwrites — no duplicates."""
+    with DatadogStore(":memory:") as store:
+        store.insert_spans([_span(trace_id="t1", span_id="a")])
+        store.insert_spans([_span(trace_id="t1", span_id="a", resource="UPDATED")])
+        assert store.span_count() == 1
+        only = list(store.read_spans())[0]
+        assert only.resource == "UPDATED"
+
+
+def test_read_spans_filters_by_time_window() -> None:
+    with DatadogStore(":memory:") as store:
+        old = _span(trace_id="t1", span_id="a", start=NOW - timedelta(hours=3))
+        mid = _span(trace_id="t2", span_id="b", start=NOW - timedelta(hours=1))
+        new = _span(trace_id="t3", span_id="c", start=NOW)
+        store.insert_spans([old, mid, new])
+
+        ids = {s.span_id for s in store.read_spans(since=NOW - timedelta(hours=2))}
+        assert ids == {"b", "c"}
+
+
+def test_read_spans_filters_by_service_and_env() -> None:
+    with DatadogStore(":memory:") as store:
+        store.insert_spans(
+            [_span(trace_id="t1", span_id="a", service="auth")],
+            env="prod",
+        )
+        store.insert_spans(
+            [_span(trace_id="t2", span_id="b", service="auth")],
+            env="staging",
+        )
+        store.insert_spans(
+            [_span(trace_id="t3", span_id="c", service="payment")],
+            env="prod",
+        )
+        prod_auth = list(store.read_spans(service="auth", env="prod"))
+        assert {s.span_id for s in prod_auth} == {"a"}
+
+
+def test_read_trace_returns_all_spans_for_one_trace() -> None:
+    with DatadogStore(":memory:") as store:
+        store.insert_spans(
+            [
+                _span(trace_id="t1", span_id="a", start=NOW),
+                _span(trace_id="t1", span_id="b", parent_id="a", start=NOW + timedelta(seconds=1)),
+                _span(trace_id="t1", span_id="c", parent_id="b", start=NOW + timedelta(seconds=2)),
+                _span(trace_id="t2", span_id="x", start=NOW),  # different trace
+            ]
+        )
+        tree = store.read_trace("t1")
+        assert [s.span_id for s in tree] == ["a", "b", "c"]  # start-time order
+
+
+def test_read_spans_ordered_by_start() -> None:
+    with DatadogStore(":memory:") as store:
+        store.insert_spans(
+            [
+                _span(trace_id="t1", span_id="late", start=NOW + timedelta(minutes=2)),
+                _span(trace_id="t1", span_id="early", start=NOW),
+            ]
+        )
+        ids = [s.span_id for s in store.read_spans()]
+        assert ids == ["early", "late"]

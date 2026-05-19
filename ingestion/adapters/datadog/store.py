@@ -15,15 +15,19 @@ SLOs) land in later phases as numbered SQL migrations under
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sqlite3
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Iterator, Literal
+
+from ingestion.adapters.datadog.client import RawSpan
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +233,142 @@ class DatadogStore:
             return True
         current = now or datetime.now(timezone.utc)
         return (current - last) > timedelta(seconds=ttl_seconds)
+
+    # ---- spans ---------------------------------------------------------
+
+    def insert_spans(
+        self,
+        spans: Iterable[RawSpan],
+        *,
+        env: str = "",
+        fetched_at: datetime | None = None,
+    ) -> int:
+        """Bulk-insert spans. Idempotent via PRIMARY KEY (trace_id, span_id):
+        re-fetching the same span overwrites the stored row.
+
+        Returns the count of rows written. Done in one transaction so a
+        crash mid-bulk leaves the spans table untouched (no half-written
+        windows that the parser would mistake for complete).
+        """
+        ts = (fetched_at or datetime.now(timezone.utc)).isoformat()
+        rows = (
+            (
+                span.trace_id,
+                span.span_id,
+                span.parent_id,
+                span.service,
+                span.resource,
+                span.operation,
+                span.type,
+                span.start.isoformat(),
+                span.duration_ms,
+                1 if span.error else 0,
+                json.dumps(span.tags, sort_keys=True),
+                env,
+                ts,
+            )
+            for span in spans
+        )
+        count = 0
+        with self._txn() as cur:
+            for row in rows:
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO spans(
+                        trace_id, span_id, parent_id, service, resource,
+                        operation, type, start, duration_ms, error,
+                        tags_json, env, fetched_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    row,
+                )
+                count += 1
+        return count
+
+    def read_spans(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        service: str | None = None,
+        env: str | None = None,
+    ) -> Iterator[RawSpan]:
+        """Stream spans back as `RawSpan` objects.
+
+        `since`/`until` filter by span start time. `service` and `env`
+        filter by exact match. Filters compose with AND.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if since is not None:
+            clauses.append("start >= ?")
+            params.append(since.isoformat())
+        if until is not None:
+            clauses.append("start <= ?")
+            params.append(until.isoformat())
+        if service is not None:
+            clauses.append("service = ?")
+            params.append(service)
+        if env is not None:
+            clauses.append("env = ?")
+            params.append(env)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        cur = self._conn.execute(
+            f"""
+            SELECT trace_id, span_id, parent_id, service, resource,
+                   operation, type, start, duration_ms, error, tags_json
+            FROM spans {where}
+            ORDER BY start ASC
+            """,
+            params,
+        )
+        for row in cur:
+            yield RawSpan(
+                trace_id=row["trace_id"],
+                span_id=row["span_id"],
+                parent_id=row["parent_id"],
+                service=row["service"],
+                resource=row["resource"],
+                operation=row["operation"],
+                type=row["type"],
+                start=_parse_dt(row["start"]),
+                duration_ms=float(row["duration_ms"]),
+                error=bool(row["error"]),
+                tags=json.loads(row["tags_json"] or "{}"),
+            )
+
+    def read_trace(self, trace_id: str) -> list[RawSpan]:
+        """Return every span belonging to one trace. Useful for trace-tree
+        reconstruction (phase 6). Returned in start-time order."""
+        return list(self.read_spans_by_trace(trace_id))
+
+    def read_spans_by_trace(self, trace_id: str) -> Iterator[RawSpan]:
+        cur = self._conn.execute(
+            """
+            SELECT trace_id, span_id, parent_id, service, resource,
+                   operation, type, start, duration_ms, error, tags_json
+            FROM spans WHERE trace_id = ? ORDER BY start ASC
+            """,
+            (trace_id,),
+        )
+        for row in cur:
+            yield RawSpan(
+                trace_id=row["trace_id"],
+                span_id=row["span_id"],
+                parent_id=row["parent_id"],
+                service=row["service"],
+                resource=row["resource"],
+                operation=row["operation"],
+                type=row["type"],
+                start=_parse_dt(row["start"]),
+                duration_ms=float(row["duration_ms"]),
+                error=bool(row["error"]),
+                tags=json.loads(row["tags_json"] or "{}"),
+            )
+
+    def span_count(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM spans").fetchone()
+        return int(row["n"])
 
     # ---- introspection -------------------------------------------------
 
