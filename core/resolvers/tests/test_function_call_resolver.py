@@ -349,3 +349,121 @@ def test_typed_parameter_without_annotation_does_not_resolve() -> None:
     )
     out = FunctionCallResolver().resolve(tree=tree, artifacts=[caller, other])
     assert out.artifacts[0].calls == ()
+
+
+def _assignment_module(
+    *,
+    file: str,
+    target: str,
+    source_kind: str,
+    source: str,
+    type_hint: str = "",
+    repo: str = "r",
+) -> Fact:
+    return Fact(
+        kind=FactKind.ASSIGNMENT,
+        file=file,
+        line=99,
+        repo_id=repo,
+        data={
+            "target": target,
+            "target_chain": [target],
+            "source_kind": source_kind,
+            "source": source,
+            "type_hint": type_hint,
+            "scope": "module",
+        },
+    )
+
+
+def test_cross_file_module_singleton_resolves() -> None:
+    """The fastapi-best-architecture pattern. A service module defines a
+    module-level singleton (`user_service = UserService()`) and other
+    modules import it directly. Calls on that imported name must resolve
+    to the source class's methods.
+
+    Without this, an entire layer of the architecture is invisible —
+    every api -> service edge in a singleton-based codebase disappears."""
+    api_file = "backend/app/admin/api/v1/sys/user.py"
+    svc_file = "backend/app/admin/service/user_service.py"
+    caller = _fn("get_userinfo", file=api_file, start=5, end=10)
+    callee_method = _method(
+        "get_userinfo_method", cls="UserService", file=svc_file, start=2, end=4
+    )
+    tree = FactTree.from_facts(
+        "r",
+        [
+            _import_from(
+                api_file, "backend.app.admin.service.user_service", ["user_service"]
+            ),
+            _symbol_fn(name="get_userinfo", file=api_file, line=5),
+            _symbol_method(
+                name="get_userinfo_method", cls="UserService", file=svc_file, line=2,
+            ),
+            _assignment_module(
+                file=svc_file,
+                target="user_service",
+                source_kind="call",
+                source="UserService",
+            ),
+            _call(api_file, line=7, callee="user_service.get_userinfo_method"),
+        ],
+    )
+    out = FunctionCallResolver().resolve(tree=tree, artifacts=[caller, callee_method])
+    by_name = {a.name: a for a in out.artifacts}
+    assert by_name["get_userinfo"].calls == (callee_method.id,)
+
+
+def test_cross_file_singleton_with_type_hint_annotation() -> None:
+    """`user_service: UserService = UserService()` — the type comes from the
+    annotation, not the RHS source. Both shapes must work."""
+    api_file = "src/api/user.py"
+    svc_file = "src/service/svc.py"
+    caller = _fn("handler", file=api_file, start=5, end=10)
+    callee = _method("do", cls="UserService", file=svc_file, start=2, end=4)
+    tree = FactTree.from_facts(
+        "r",
+        [
+            _import_from(api_file, "src.service.svc", ["user_service"]),
+            _symbol_fn(name="handler", file=api_file, line=5),
+            _symbol_method(name="do", cls="UserService", file=svc_file, line=2),
+            # type_hint set, source_kind="expr" (e.g. factory returns the type)
+            _assignment_module(
+                file=svc_file,
+                target="user_service",
+                source_kind="expr",
+                source="",
+                type_hint="UserService",
+            ),
+            _call(api_file, line=7, callee="user_service.do"),
+        ],
+    )
+    out = FunctionCallResolver().resolve(tree=tree, artifacts=[caller, callee])
+    by_name = {a.name: a for a in out.artifacts}
+    assert by_name["handler"].calls == (callee.id,)
+
+
+def test_cross_file_singleton_does_not_match_unrelated_imports() -> None:
+    """Negative case: if `user_service` isn't imported, don't resolve it.
+    Guards against a too-greedy index lookup."""
+    api_file = "src/api/user.py"
+    svc_file = "src/service/svc.py"
+    caller = _fn("handler", file=api_file, start=5, end=10)
+    callee = _method("do", cls="UserService", file=svc_file, start=2, end=4)
+    tree = FactTree.from_facts(
+        "r",
+        [
+            # No import of `user_service` into api file.
+            _symbol_fn(name="handler", file=api_file, line=5),
+            _symbol_method(name="do", cls="UserService", file=svc_file, line=2),
+            _assignment_module(
+                file=svc_file,
+                target="user_service",
+                source_kind="call",
+                source="UserService",
+            ),
+            _call(api_file, line=7, callee="user_service.do"),
+        ],
+    )
+    out = FunctionCallResolver().resolve(tree=tree, artifacts=[caller, callee])
+    assert out.artifacts[0].calls == ()

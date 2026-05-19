@@ -346,6 +346,75 @@ class FunctionCallResolver:
             if target is not None:
                 return target
 
+        # Step 6: receiver is a module-level singleton imported from another
+        # file. The dominant idiom in real FastAPI codebases:
+        #
+        #     # service/user_service.py (last line)
+        #     user_service: UserService = UserService()
+        #
+        #     # api/v1/sys/user.py
+        #     from backend.app.admin.service.user_service import user_service
+        #     user_service.get_userinfo(...)
+        #
+        # We follow the import to the singleton's *source* file's ASSIGNMENT
+        # fact to recover the bound type, then look up the method directly
+        # against the source file's class — the caller file never imports
+        # `UserService` itself, only the singleton, so the "imported type"
+        # walk inside `_lookup_method_by_type` wouldn't find it.
+        bound = self._resolve_imported_singleton(
+            head=head,
+            file_imports=file_imports,
+            profile=profile,
+            alias_map=alias_map,
+            module_var_types=module_var_types,
+        )
+        if bound is not None:
+            source_file, type_name = bound
+            target = methods_by_qualifier.get((source_file, type_name, method))
+            if target is not None:
+                return target
+            # The class may live in a different file than the singleton's
+            # module (e.g. re-exported via __init__.py). Fall back to the
+            # imports walk for that case.
+            target = self._lookup_method_by_type(
+                type_name=type_name,
+                method_name=method,
+                caller_file=call_file,
+                profile=profile,
+                file_imports=file_imports,
+                alias_map=alias_map,
+                methods_by_qualifier=methods_by_qualifier,
+            )
+            if target is not None:
+                return target
+
+        return None
+
+    def _resolve_imported_singleton(
+        self,
+        *,
+        head: str,
+        file_imports: "_ImportIndex",
+        profile: LanguageProfile,
+        alias_map: dict[tuple[str, str], list[tuple[str, str]]],
+        module_var_types: dict[tuple[str, str], str],
+    ) -> tuple[str, str] | None:
+        """Return (source_file, type_name) for an imported module-level singleton.
+
+        Walks the caller file's `from MOD import NAME` imports for one whose
+        local name matches `head`. Then expands re-export aliases (handles
+        `__init__.py` re-exports) and probes the candidate source files for
+        a module-level ASSIGNMENT named `head` whose type was recorded by
+        `_build_module_var_types`. Returns the (file, type) pair, or None.
+        """
+        for module, name, _level in file_imports.from_names:
+            if name != head:
+                continue
+            for real_module, real_name in self._expand(module, head, alias_map):
+                for candidate_file in resolve_candidate_files(real_module, profile):
+                    t = module_var_types.get((candidate_file, real_name))
+                    if t:
+                        return candidate_file, t
         return None
 
     def _resolve_dependency_injection(
