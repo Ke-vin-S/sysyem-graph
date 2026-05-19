@@ -123,6 +123,11 @@ class ExternalConnection(_Provenance):
     target_name: str = Field(alias="targetName", min_length=1)
     """Human-readable target name. Used when target_service_id is unknown (third-party)."""
 
+    target_endpoint_id: str | None = Field(default=None, alias="targetEndpointId")
+    """The specific Endpoint this connection hits, when known. Populated by the
+    post-merge enrichment pass that joins traced `endpoint` strings against
+    static-analysis Endpoint nodes by (target_service, method, path)."""
+
     protocol: str = Field(default="unknown")
     endpoint: str = Field(default="")
     """For HTTP: 'METHOD /path'. For gRPC: 'service/Method'. For Kafka: topic name."""

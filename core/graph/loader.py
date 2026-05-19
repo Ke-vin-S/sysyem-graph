@@ -189,6 +189,17 @@ class GraphLoader:
                     if c.target_service_id
                 ],
             )
+            stats.edges["TARGETS_ENDPOINT"] = self._merge_edges(
+                session,
+                src_label="ExternalConnection",
+                rel="TARGETS_ENDPOINT",
+                dst_label="Endpoint",
+                rows=[
+                    {"src": c.id, "dst": c.target_endpoint_id}
+                    for c in connections
+                    if c.target_endpoint_id
+                ],
+            )
             stats.edges["EXPOSES"] = self._merge_edges(
                 session,
                 src_label="CodeArtifact",
@@ -439,6 +450,7 @@ def _connection_props(c: ExternalConnection) -> dict[str, Any]:
         "type": c.type,
         "source_service_id": c.source_service_id,
         "target_service_id": c.target_service_id or "",
+        "target_endpoint_id": c.target_endpoint_id or "",
         "target_name": c.target_name,
         "protocol": c.protocol,
         "endpoint": c.endpoint,

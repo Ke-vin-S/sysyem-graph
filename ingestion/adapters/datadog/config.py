@@ -26,6 +26,10 @@ class DatadogAdapterConfig:
     services_allowlist: tuple[str, ...] = ()
     """If non-empty, only ingest spans where source service is in this list."""
 
+    env: str = ""
+    """Optional `env:<value>` Datadog tag filter (e.g. 'prod'). Empty = no filter.
+    Keeps staging/dev traffic out of the production impact graph."""
+
     @classmethod
     def from_settings(cls, settings: DatadogSettings) -> "DatadogAdapterConfig":
         if not settings.enabled:
@@ -36,4 +40,5 @@ class DatadogAdapterConfig:
             app_key=settings.app_key.get_secret_value(),
             site=settings.site,
             lookback_hours=settings.trace_lookback_hours,
+            env=settings.env,
         )

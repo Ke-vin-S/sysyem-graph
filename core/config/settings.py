@@ -30,6 +30,8 @@ class DatadogSettings(BaseSettings):
     app_key: SecretStr | None = None
     site: str = "datadoghq.com"
     trace_lookback_hours: int = Field(default=720, ge=1)
+    env: str = ""
+    """Optional env tag to scope the span query (e.g. 'prod'). Empty = no filter."""
 
     @property
     def enabled(self) -> bool:

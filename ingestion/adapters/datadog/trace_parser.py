@@ -29,6 +29,8 @@ class _Bucket:
     endpoint: str
     protocol: str
     span_type: str
+    target_is_service: bool
+    """True if the target is a tracked service; False for infra (DB, queue, cache)."""
     count: int = 0
     errors: int = 0
     first_seen: datetime | None = None
@@ -58,18 +60,22 @@ class TraceParser:
 
         for span in spans:
             result.spans_seen += 1
-            target = span.peer_service
+            target, target_is_service = span.resolve_target()
+            # Always remember the source service as observed.
+            services_seen.setdefault(span.service, span.start)
+            services_seen[span.service] = max(services_seen[span.service], span.start)
             if not target or target == span.service:
-                # Internal span (no cross-service edge). Still informs services_seen.
-                services_seen.setdefault(span.service, span.start)
-                services_seen[span.service] = max(services_seen[span.service], span.start)
+                # Internal span (no cross-service edge); source already recorded.
                 result.spans_skipped += 1
                 continue
 
-            services_seen.setdefault(span.service, span.start)
-            services_seen[span.service] = max(services_seen[span.service], span.start)
-            services_seen.setdefault(target, span.start)
-            services_seen[target] = max(services_seen[target], span.start)
+            # Only register the target as a Service node when it actually is one.
+            # Infrastructure targets (DB hosts, kafka topics, redis clusters) are
+            # recorded as ExternalConnection.target_name only — adding them as
+            # Service nodes would pollute the service inventory.
+            if target_is_service:
+                services_seen.setdefault(target, span.start)
+                services_seen[target] = max(services_seen[target], span.start)
 
             endpoint = _normalize_endpoint(span)
             protocol = _classify_protocol(span)
@@ -82,6 +88,7 @@ class TraceParser:
                     endpoint=endpoint,
                     protocol=protocol,
                     span_type=span.type or "unknown",
+                    target_is_service=target_is_service,
                     first_seen=span.start,
                     last_seen=span.start,
                 )
@@ -154,7 +161,7 @@ def _connection_from_bucket(
         id=_connection_id(bucket),
         type=_edge_type(bucket.protocol),
         sourceServiceId=bucket.source,
-        targetServiceId=bucket.target,
+        targetServiceId=bucket.target if bucket.target_is_service else None,
         targetName=bucket.target,
         protocol=bucket.protocol,
         endpoint=bucket.endpoint,

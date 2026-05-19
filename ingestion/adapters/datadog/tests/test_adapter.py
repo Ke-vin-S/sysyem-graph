@@ -25,8 +25,13 @@ def _span(
     span_type: str = "http",
     error: bool = False,
     start: datetime | None = None,
+    extra_tags: dict[str, str] | None = None,
 ) -> RawSpan:
-    tags = {"peer.service": peer} if peer else {}
+    tags: dict[str, str] = {}
+    if peer:
+        tags["peer.service"] = peer
+    if extra_tags:
+        tags.update(extra_tags)
     return RawSpan(
         trace_id="t1",
         span_id="s1",
@@ -109,3 +114,118 @@ def test_adapter_query_includes_allowlist() -> None:
     query = adapter._build_query(IngestionContext())  # noqa: SLF001
     assert "service:auth" in query
     assert " OR " in query
+
+
+def test_adapter_query_includes_env_filter() -> None:
+    config = DatadogAdapterConfig(api_key="k", app_key="a", env="prod")
+    adapter = DatadogAdapter(config, client=DatadogClient(api_key="k", app_key="a"))
+    query = adapter._build_query(IngestionContext())  # noqa: SLF001
+    assert query == "env:prod"
+
+
+def test_adapter_query_combines_env_and_allowlist() -> None:
+    config = DatadogAdapterConfig(
+        api_key="k", app_key="a", env="prod", services_allowlist=("auth", "payment")
+    )
+    adapter = DatadogAdapter(config, client=DatadogClient(api_key="k", app_key="a"))
+    query = adapter._build_query(IngestionContext())  # noqa: SLF001
+    assert query.startswith("env:prod AND ")
+    assert "service:auth" in query and "service:payment" in query
+    assert " OR " in query  # services joined with OR inside their group
+
+
+def test_adapter_query_env_only_with_single_service() -> None:
+    config = DatadogAdapterConfig(
+        api_key="k", app_key="a", env="staging", services_allowlist=("auth",)
+    )
+    adapter = DatadogAdapter(config, client=DatadogClient(api_key="k", app_key="a"))
+    query = adapter._build_query(IngestionContext())  # noqa: SLF001
+    assert query == "env:staging AND service:auth"
+
+
+# ---- infra targets (db/cache/queue) ---------------------------------------
+
+
+def test_trace_parser_emits_db_connection_with_null_service_id() -> None:
+    parser = TraceParser(lookback_hours=1, min_span_count=1)
+    spans = [
+        _span(
+            service="auth",
+            peer=None,
+            resource="SELECT users",
+            span_type="postgres",
+            extra_tags={"db.instance": "users-primary"},
+        )
+    ]
+    result = parser.parse(spans, now=NOW)
+    assert len(result.connections) == 1
+    conn = result.connections[0]
+    assert conn.target_service_id is None
+    assert conn.target_name == "users-primary"
+    assert conn.endpoint == "SELECT users"
+    # The DB host must NOT show up as a Service node.
+    assert {s.id for s in result.services} == {"auth"}
+
+
+def test_trace_parser_emits_kafka_connection_from_topic_tag() -> None:
+    parser = TraceParser(lookback_hours=1, min_span_count=1)
+    spans = [
+        _span(
+            service="auth",
+            peer=None,
+            resource="produce orders",
+            span_type="kafka",
+            extra_tags={"messaging.destination": "orders.v1"},
+        )
+    ]
+    result = parser.parse(spans, now=NOW)
+    assert len(result.connections) == 1
+    conn = result.connections[0]
+    assert conn.target_service_id is None
+    assert conn.target_name == "orders.v1"
+    assert conn.type == "kafka"
+
+
+def test_trace_parser_emits_redis_connection() -> None:
+    parser = TraceParser(lookback_hours=1, min_span_count=1)
+    spans = [
+        _span(
+            service="auth",
+            peer=None,
+            resource="GET session:42",
+            span_type="redis",
+            extra_tags={"out.host": "redis-cache.internal"},
+        )
+    ]
+    result = parser.parse(spans, now=NOW)
+    assert len(result.connections) == 1
+    assert result.connections[0].target_name == "redis-cache.internal"
+    assert result.connections[0].target_service_id is None
+    # Redis target is NOT added as a service.
+    assert {s.id for s in result.services} == {"auth"}
+
+
+def test_trace_parser_service_target_still_sets_target_service_id() -> None:
+    # Regression: the new infra path must not break ordinary service-to-service edges.
+    parser = TraceParser(lookback_hours=1, min_span_count=1)
+    spans = [_span(service="auth", peer="payment", resource="POST /charges")]
+    result = parser.parse(spans, now=NOW)
+    assert len(result.connections) == 1
+    assert result.connections[0].target_service_id == "payment"
+    assert result.connections[0].target_name == "payment"
+
+
+def test_trace_parser_infra_span_without_any_target_tag_is_skipped() -> None:
+    parser = TraceParser(lookback_hours=1, min_span_count=1)
+    spans = [
+        _span(
+            service="auth",
+            peer=None,
+            resource="SELECT 1",
+            span_type="postgres",
+            extra_tags={},
+        )
+    ]
+    result = parser.parse(spans, now=NOW)
+    assert result.connections == []
+    assert result.spans_skipped == 1

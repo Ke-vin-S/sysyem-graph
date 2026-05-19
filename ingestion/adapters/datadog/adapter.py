@@ -73,7 +73,15 @@ class DatadogAdapter(IngestionAdapter):
         return result
 
     def _build_query(self, context: IngestionContext) -> str:
+        clauses: list[str] = []
+        if self._config.env:
+            clauses.append(f"env:{self._config.env}")
         allowlist = self._config.services_allowlist or context.repos
-        if not allowlist:
+        if allowlist:
+            services_clause = " OR ".join(f"service:{svc}" for svc in allowlist)
+            if len(allowlist) > 1:
+                services_clause = f"({services_clause})"
+            clauses.append(services_clause)
+        if not clauses:
             return "*"
-        return " OR ".join(f"service:{svc}" for svc in allowlist)
+        return " AND ".join(clauses)

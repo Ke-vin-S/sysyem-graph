@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections import Counter
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -23,8 +24,31 @@ from ingestion.adapters.datadog import DatadogAdapter, DatadogAdapterConfig
 from ingestion.adapters.github import GitHubAdapter, GitHubAdapterConfig
 from ingestion.adapters.testparser import TestParserAdapter, TestParserAdapterConfig
 
-app = typer.Typer(help="system-graph ingestion CLI")
+# `invoke_without_command=True` lets `sg-ingest --out ./out --skip datadog`
+# keep working after we added the `datadog-preview` sibling command — the
+# callback accepts the same options as `run` and falls through to it when
+# no explicit subcommand is given.
+app = typer.Typer(
+    help="system-graph ingestion CLI",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 logger = logging.getLogger(__name__)
+
+
+@app.callback()
+def _root(
+    ctx: typer.Context,
+    out: Path = typer.Option(Path("./out"), help="Directory to write merged records as JSON."),
+    skip: list[str] = typer.Option(  # noqa: B008
+        [],
+        "--skip",
+        help="Adapter identifier(s) to disable for this run (e.g. --skip datadog).",
+    ),
+) -> None:
+    """If no subcommand is given, run the full ingestion pipeline (legacy default)."""
+    if ctx.invoked_subcommand is None:
+        _do_run(out=out, skip=skip)
 
 
 @app.command()
@@ -37,6 +61,10 @@ def run(
     ),
 ) -> None:
     """Run all configured Phase 1 adapters and write merged records to disk."""
+    _do_run(out=out, skip=skip)
+
+
+def _do_run(*, out: Path, skip: list[str]) -> None:
     settings = get_settings()
     logging.basicConfig(level=settings.log_level)
 
@@ -109,6 +137,86 @@ def run(
         raise typer.Exit(code=1)
 
 
+@app.command("datadog-preview")
+def datadog_preview(
+    lookback_hours: int = typer.Option(
+        1, "--lookback-hours", help="How far back to query Datadog (default 1h)."
+    ),
+    env: str = typer.Option(
+        "",
+        "--env",
+        help="Override DD_ENV for this preview run. Empty = use the env var / no filter.",
+    ),
+    top: int = typer.Option(10, "--top", help="Number of busiest connections to print."),
+    services_only: bool = typer.Option(
+        False, "--services-only", help="Skip the connection-level dump; print services only."
+    ),
+) -> None:
+    """Pull a small Datadog window, print a summary, write nothing to disk.
+
+    Use this before a real `run` to sanity-check that your DD_API_KEY,
+    DD_APP_KEY, DD_SITE, and DD_ENV are pulling the data you expect.
+    """
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+
+    if not settings.datadog.enabled:
+        typer.secho(
+            "datadog disabled: set DD_API_KEY and DD_APP_KEY in your environment.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+
+    cfg = DatadogAdapterConfig.from_settings(settings.datadog)
+    cfg = DatadogAdapterConfig(
+        api_key=cfg.api_key,
+        app_key=cfg.app_key,
+        site=cfg.site,
+        lookback_hours=lookback_hours,
+        min_span_count=1,
+        services_allowlist=cfg.services_allowlist,
+        env=env or cfg.env,
+    )
+
+    adapter = DatadogAdapter(cfg)
+    typer.echo(f"querying datadog: lookback={lookback_hours}h env={cfg.env or '<all>'}")
+    result = adapter.extract(IngestionContext())
+
+    typer.echo("")
+    typer.echo(f"services observed: {len(result.services)}")
+    for svc in result.services:
+        typer.echo(f"  - {svc.id}")
+
+    if services_only:
+        return
+
+    connections = sorted(
+        result.connections,
+        key=lambda c: float(c.data_flow.get("spans_observed", "0") or 0),
+        reverse=True,
+    )
+    typer.echo("")
+    typer.echo(f"connections observed: {len(connections)}")
+
+    proto_hist: Counter[str] = Counter(c.protocol for c in connections)
+    typer.echo("by protocol: " + ", ".join(f"{p}={n}" for p, n in proto_hist.most_common()))
+
+    typer.echo("")
+    typer.echo(f"top {min(top, len(connections))} connections by span count:")
+    for c in connections[:top]:
+        target = c.target_service_id or f"({c.target_name})"
+        typer.echo(
+            f"  {c.source_service_id:20s} -> {target:25s} {c.endpoint:30s} "
+            f"spans={c.data_flow.get('spans_observed', '?')} "
+            f"err={c.data_flow.get('error_rate', '?')}"
+        )
+
+    if result.warnings:
+        typer.echo("")
+        for w in result.warnings:
+            typer.secho(f"warning: {w}", fg=typer.colors.YELLOW)
+
+
 def _register_adapters(
     registry: AdapterRegistry, settings: Any, skipped: set[str]
 ) -> None:
@@ -164,6 +272,10 @@ def _build_relationships(
             edges.append({"src": conn.source_service_id, "rel": "INITIATES", "dst": conn.id})
         if conn.target_service_id and conn.target_service_id in service_ids:
             edges.append({"src": conn.id, "rel": "TARGETS", "dst": conn.target_service_id})
+        if conn.target_endpoint_id:
+            edges.append(
+                {"src": conn.id, "rel": "TARGETS_ENDPOINT", "dst": conn.target_endpoint_id}
+            )
 
     for endpoint in endpoints:
         if endpoint.repo_id in service_ids:

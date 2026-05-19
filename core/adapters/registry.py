@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from core.adapters.base import AdapterResult, IngestionAdapter, IngestionContext
+from core.adapters.enrichment import link_connections_to_endpoints
 from core.adapters.merger import MergedResult, ResultMerger
 from core.adapters.validator import ResultValidator, ValidationReport
 from core.types.errors import IngestionError
@@ -109,6 +110,9 @@ class AdapterRegistry:
                 report.failures[name] = f"{type(exc).__name__}: {exc}"
 
         report.merged = self._merger.merge(report.results)
+        # Cross-adapter joins that can only run after all adapters report:
+        # e.g. attach traced ExternalConnections to static Endpoints.
+        link_connections_to_endpoints(report.merged)
         report.validation = self._validator.validate(report.merged)
         report.finished_at = datetime.now(timezone.utc)
         return report

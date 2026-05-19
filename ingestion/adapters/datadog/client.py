@@ -17,6 +17,18 @@ from core.types.errors import IngestionError
 
 logger = logging.getLogger(__name__)
 
+#: Datadog span.type values that mean "this call hits an infrastructure system
+#: (database / cache / queue), not another tracked service." The target_name we
+#: extract from the tags identifies a host/topic/db, not a peer service — so
+#: ExternalConnection.target_service_id stays None.
+_INFRA_SPAN_TYPES = frozenset(
+    {
+        "db", "sql", "postgres", "mysql", "mongodb", "elasticsearch", "cassandra",
+        "cache", "redis", "memcached",
+        "queue", "kafka", "rabbitmq", "amqp", "sqs", "sns",
+    }
+)
+
 
 @dataclass
 class RawSpan:
@@ -42,18 +54,51 @@ class RawSpan:
     error: bool = False
     tags: dict[str, str] = field(default_factory=dict)
 
-    @property
-    def peer_service(self) -> str | None:
-        """Best-effort identification of the *callee*.
+    def resolve_target(self) -> tuple[str | None, bool]:
+        """Return `(target_name, is_service)`.
 
-        Datadog tags this in several ways depending on the integration; we
-        check the conventional spots in priority order.
+        `is_service=True` means the callee is another tracked service and we
+        should set `ExternalConnection.target_service_id`. `False` means
+        the target is infrastructure (DB host, queue topic, cache cluster);
+        we record `target_name` only.
+
+        Resolution order:
+          1. `peer.service` — Datadog's canonical service tag → service target.
+          2. If `span.type` indicates infra, fall through to infra-shaped tags
+             (db.instance, kafka.topic, etc.) → infra target.
+          3. HTTP/gRPC fallback: `out.host` / `http.host` → service target.
         """
-        for key in ("peer.service", "out.host", "http.host", "db.instance"):
+        peer = self.tags.get("peer.service")
+        if peer:
+            return peer, True
+        if self.type in _INFRA_SPAN_TYPES:
+            for key in (
+                "db.instance",
+                "db.name",
+                "messaging.destination",
+                "kafka.topic",
+                "topic",
+                "cache.host",
+                "out.host",
+                "peer.hostname",
+            ):
+                value = self.tags.get(key)
+                if value:
+                    return value, False
+            return None, False
+        for key in ("out.host", "http.host"):
             value = self.tags.get(key)
             if value:
-                return value
-        return None
+                return value, True
+        return None, False
+
+    @property
+    def peer_service(self) -> str | None:
+        """Backwards-compatible: just the target name when present.
+        Prefer `resolve_target()` in new code — it also tells you whether
+        the target is a service vs. infrastructure."""
+        target, _ = self.resolve_target()
+        return target
 
 
 class DatadogClient:
