@@ -73,7 +73,9 @@ class DatadogAdapter(IngestionAdapter):
         # Fetch only if our staged spans are older than the TTL — replays
         # of `run` within the window reuse the cache instead of re-hitting
         # Datadog.
-        if self._store.is_stale("spans", ttl_seconds=self._config.spans_ttl_seconds):
+        if self._store.is_stale(
+            "spans", ttl_seconds=self._config.spans_ttl_seconds, now=context.now
+        ):
             query = self._build_query(context)
             logger.info(
                 "datadog: span cache stale, fetching (lookback=%dh, query=%r)",
@@ -97,7 +99,9 @@ class DatadogAdapter(IngestionAdapter):
         # Catalog has its own TTL — usually much longer than spans
         # (definitions change rarely). Failures here don't kill the run;
         # we just log and continue with whatever's already staged.
-        if self._store.is_stale("catalog", ttl_seconds=self._config.catalog_ttl_seconds):
+        if self._store.is_stale(
+            "catalog", ttl_seconds=self._config.catalog_ttl_seconds, now=context.now
+        ):
             logger.info("datadog: catalog cache stale, fetching")
             try:
                 self._fetcher.fetch_catalog()
