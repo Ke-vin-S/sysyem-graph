@@ -27,7 +27,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Iterator, Literal
 
-from ingestion.adapters.datadog.client import RawSpan
+from ingestion.adapters.datadog.client import RawServiceDefinition, RawSpan
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +368,97 @@ class DatadogStore:
 
     def span_count(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) AS n FROM spans").fetchone()
+        return int(row["n"])
+
+    # ---- service catalog -----------------------------------------------
+
+    def insert_service_definitions(
+        self,
+        definitions: Iterable[RawServiceDefinition],
+        *,
+        fetched_at: datetime | None = None,
+    ) -> int:
+        """Bulk upsert service catalog entries. PK is `service_name`, so
+        a re-fetch overwrites prior rows for the same service."""
+        ts = (fetched_at or datetime.now(timezone.utc)).isoformat()
+        count = 0
+        with self._txn() as cur:
+            for d in definitions:
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO services_catalog(
+                        service_name, team, tier, lifecycle, application,
+                        description, language, owner_email, repo_url,
+                        repos_json, links_json, contacts_json, raw_json,
+                        schema_version, fetched_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        d.service_name,
+                        d.team,
+                        d.tier,
+                        d.lifecycle,
+                        d.application,
+                        d.description,
+                        d.language,
+                        d.owner_email,
+                        d.repo_url,
+                        json.dumps(list(d.repos), sort_keys=True),
+                        json.dumps(d.links, sort_keys=True),
+                        json.dumps(list(d.contacts), sort_keys=True),
+                        json.dumps(d.raw, sort_keys=True, default=str),
+                        d.schema_version,
+                        ts,
+                    ),
+                )
+                count += 1
+        return count
+
+    def read_service_definitions(
+        self,
+        *,
+        team: str | None = None,
+        tier: str | None = None,
+    ) -> Iterator[RawServiceDefinition]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if team is not None:
+            clauses.append("team = ?")
+            params.append(team)
+        if tier is not None:
+            clauses.append("tier = ?")
+            params.append(tier)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        cur = self._conn.execute(
+            f"""
+            SELECT service_name, team, tier, lifecycle, application,
+                   description, language, owner_email, repo_url,
+                   repos_json, links_json, contacts_json, raw_json,
+                   schema_version
+            FROM services_catalog {where}
+            ORDER BY service_name ASC
+            """,
+            params,
+        )
+        for row in cur:
+            yield RawServiceDefinition(
+                service_name=row["service_name"],
+                team=row["team"] or "",
+                tier=row["tier"] or "",
+                lifecycle=row["lifecycle"] or "",
+                application=row["application"] or "",
+                description=row["description"] or "",
+                languages=(row["language"],) if row["language"] else (),
+                owner_email=row["owner_email"] or "",
+                repos=tuple(json.loads(row["repos_json"] or "[]")),
+                links=json.loads(row["links_json"] or "{}"),
+                contacts=tuple(json.loads(row["contacts_json"] or "[]")),
+                schema_version=row["schema_version"] or "",
+                raw=json.loads(row["raw_json"] or "{}"),
+            )
+
+    def service_definition_count(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM services_catalog").fetchone()
         return int(row["n"])
 
     # ---- introspection -------------------------------------------------

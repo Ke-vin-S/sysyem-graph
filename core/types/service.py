@@ -101,6 +101,15 @@ class Service(_Provenance):
     language: str = Field(default="unknown")
     framework: str = Field(default="unknown")
     owner: str = Field(default="unknown")
+    team: str = Field(default="")
+    """Owning team (Datadog Service Catalog `team` field). Empty = unknown."""
+    tier: str = Field(default="")
+    """Criticality tier from the Service Catalog (e.g. "tier-1"). Empty = unknown."""
+    description: str = Field(default="")
+    """Free-text description from the Service Catalog. Empty when missing."""
+    links: dict[str, str] = Field(default_factory=dict)
+    """Name → URL map of useful links (runbook / dashboard / docs / repo / …).
+    Sourced from the Service Catalog `links` array."""
     created_at: datetime = Field(alias="createdAt")
     last_updated_at: datetime = Field(alias="lastUpdatedAt")
     is_active: bool = Field(default=True, alias="isActive")

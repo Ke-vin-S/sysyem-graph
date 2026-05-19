@@ -34,6 +34,8 @@ class DatadogSettings(BaseSettings):
     """Optional env tag to scope the span query (e.g. 'prod'). Empty = no filter."""
     spans_ttl_seconds: int = Field(default=300, ge=0)
     """How long the staged spans table stays fresh between runs."""
+    catalog_ttl_seconds: int = Field(default=3600, ge=0)
+    """How long the staged service catalog stays fresh."""
     store_path: str = "./out/datadog.db"
     """Where to keep the SQLite staging store."""
 

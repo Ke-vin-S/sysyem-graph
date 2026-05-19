@@ -76,7 +76,7 @@ class DatadogAdapter(IngestionAdapter):
         if self._store.is_stale("spans", ttl_seconds=self._config.spans_ttl_seconds):
             query = self._build_query(context)
             logger.info(
-                "datadog: cache stale, fetching (lookback=%dh, query=%r)",
+                "datadog: span cache stale, fetching (lookback=%dh, query=%r)",
                 self._config.lookback_hours,
                 query,
             )
@@ -92,10 +92,24 @@ class DatadogAdapter(IngestionAdapter):
                 raise IngestionError("datadog", "span fetch failed", cause=exc) from exc
         else:
             last = self._store.last_fetched_at("spans")
-            logger.info("datadog: cache fresh (last fetched at %s); skipping fetch", last)
+            logger.info("datadog: span cache fresh (last fetched at %s); skipping fetch", last)
+
+        # Catalog has its own TTL — usually much longer than spans
+        # (definitions change rarely). Failures here don't kill the run;
+        # we just log and continue with whatever's already staged.
+        if self._store.is_stale("catalog", ttl_seconds=self._config.catalog_ttl_seconds):
+            logger.info("datadog: catalog cache stale, fetching")
+            try:
+                self._fetcher.fetch_catalog()
+            except IngestionError as exc:
+                logger.warning("datadog: catalog fetch failed: %s; continuing", exc)
+        else:
+            logger.info("datadog: catalog cache fresh; skipping fetch")
 
         # Parse from the store, scoped to the configured lookback window
-        # (the store may hold older spans too).
+        # (the store may hold older spans too). The parser also overlays
+        # catalog metadata onto the span-derived services and surfaces
+        # any catalog-only services as inactive entries.
         since = context.now - timedelta(hours=self._config.lookback_hours)
         parsed = self._parser.parse(since=since, now=context.now)
 

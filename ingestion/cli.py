@@ -234,13 +234,18 @@ def datadog_fetch(
     ),
     env: str = typer.Option("", "--env", help="Override DD_ENV for this fetch."),
     force: bool = typer.Option(
-        False, "--force", help="Fetch even if the staged spans are still within their TTL."
+        False, "--force", help="Fetch even if the staged data is still within its TTL."
+    ),
+    spans: bool = typer.Option(True, "--spans/--no-spans", help="Fetch APM spans."),
+    catalog: bool = typer.Option(
+        True, "--catalog/--no-catalog", help="Fetch the Service Catalog."
     ),
 ) -> None:
-    """Pull Datadog spans into the staging store. No parsing, no JSON.
+    """Pull Datadog data into the staging store. No parsing, no JSON.
 
-    Use this to refresh the cache on its own — `datadog-parse` and `run`
-    will pick up the new spans next time they execute.
+    By default fetches both spans and the Service Catalog. Use
+    `--no-spans` / `--no-catalog` to skip individual APIs, or `--force`
+    to bypass TTL freshness checks.
     """
     settings = get_settings()
     logging.basicConfig(level=settings.log_level)
@@ -256,26 +261,43 @@ def datadog_fetch(
         cfg = _replace_cfg(cfg, env=env)
 
     store = DatadogStore(cfg.store_path)
-    if not force and not store.is_stale("spans", ttl_seconds=cfg.spans_ttl_seconds):
-        last = store.last_fetched_at("spans")
-        typer.echo(
-            f"spans cache fresh (last fetched {last.isoformat() if last else 'never'}); "
-            "use --force to refetch."
-        )
-        return
-
     client = DatadogClient(api_key=cfg.api_key, app_key=cfg.app_key, site=cfg.site)
     fetcher = DatadogFetcher(store, client)
-    adapter = DatadogAdapter(cfg, client=client, store=store, fetcher=fetcher)
-    query = adapter._build_query(IngestionContext())  # noqa: SLF001
-    typer.echo(f"fetching: lookback={cfg.lookback_hours}h env={cfg.env or '<all>'} query={query!r}")
 
-    count = fetcher.fetch_spans(
-        lookback_hours=cfg.lookback_hours,
-        query=query,
-        env=cfg.env,
-    )
-    typer.echo(f"wrote {count} spans to {cfg.store_path}")
+    if spans:
+        if not force and not store.is_stale("spans", ttl_seconds=cfg.spans_ttl_seconds):
+            last = store.last_fetched_at("spans")
+            typer.echo(
+                f"spans cache fresh (last {last.isoformat() if last else 'never'}); "
+                "skipping. Use --force to refetch."
+            )
+        else:
+            adapter = DatadogAdapter(cfg, client=client, store=store, fetcher=fetcher)
+            query = adapter._build_query(IngestionContext())  # noqa: SLF001
+            typer.echo(
+                f"fetching spans: lookback={cfg.lookback_hours}h env={cfg.env or '<all>'} "
+                f"query={query!r}"
+            )
+            count = fetcher.fetch_spans(
+                lookback_hours=cfg.lookback_hours,
+                query=query,
+                env=cfg.env,
+            )
+            typer.echo(f"  wrote {count} spans")
+
+    if catalog:
+        if not force and not store.is_stale("catalog", ttl_seconds=cfg.catalog_ttl_seconds):
+            last = store.last_fetched_at("catalog")
+            typer.echo(
+                f"catalog cache fresh (last {last.isoformat() if last else 'never'}); "
+                "skipping. Use --force to refetch."
+            )
+        else:
+            typer.echo("fetching service catalog")
+            count = fetcher.fetch_catalog()
+            typer.echo(f"  wrote {count} catalog entries")
+
+    typer.echo(f"store: {cfg.store_path}")
 
 
 @app.command("datadog-parse")
@@ -356,6 +378,7 @@ def _replace_cfg(cfg: DatadogAdapterConfig, **kwargs: Any) -> DatadogAdapterConf
         services_allowlist=kwargs.get("services_allowlist", cfg.services_allowlist),
         env=kwargs.get("env", cfg.env),
         spans_ttl_seconds=kwargs.get("spans_ttl_seconds", cfg.spans_ttl_seconds),
+        catalog_ttl_seconds=kwargs.get("catalog_ttl_seconds", cfg.catalog_ttl_seconds),
         store_path=kwargs.get("store_path", cfg.store_path),
     )
 

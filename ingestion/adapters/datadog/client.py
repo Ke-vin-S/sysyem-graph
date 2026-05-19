@@ -101,6 +101,46 @@ class RawSpan:
         return target
 
 
+@dataclass
+class RawServiceDefinition:
+    """Normalized view of one Datadog Service Catalog entry.
+
+    Datadog returns the `service.yaml` payload almost verbatim under
+    `attributes.schema` with light wrapping. We flatten the fields we
+    actually use and keep the original schema dict so later phases can
+    pull additional fields without changing the storage layer.
+    """
+
+    service_name: str
+    team: str = ""
+    tier: str = ""
+    lifecycle: str = ""
+    application: str = ""
+    description: str = ""
+    languages: tuple[str, ...] = field(default_factory=tuple)
+    owner_email: str = ""
+    repos: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    """List of `{name, provider, url}` dicts. First entry's url surfaces
+    on the `Service.repo_url` field; the rest are kept in `repos_json`."""
+    links: dict[str, str] = field(default_factory=dict)
+    """`name -> url` map (runbook / dashboard / docs / …)."""
+    contacts: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    """List of `{name, type, contact}` dicts."""
+    schema_version: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def repo_url(self) -> str:
+        """Convenience: first repo URL (or empty when none declared)."""
+        if not self.repos:
+            return ""
+        return str(self.repos[0].get("url", "") or "")
+
+    @property
+    def language(self) -> str:
+        return self.languages[0] if self.languages else ""
+
+
 class DatadogClient:
     """Thin client. Swap out by passing a custom `_api_factory` in tests."""
 
@@ -186,6 +226,37 @@ class DatadogClient:
         except Exception as exc:  # pragma: no cover - network/SDK errors
             raise IngestionError("datadog", "list_spans failed", cause=exc) from exc
 
+    def list_service_definitions(
+        self, *, schema_version: str = "v2.2"
+    ) -> Iterator[RawServiceDefinition]:
+        """Yield every Service Catalog definition.
+
+        `schema_version` controls which schema variant Datadog returns the
+        payloads in. v2.2 is the richest at the time of writing; older
+        services may have been registered against v2.1 / v2 but Datadog
+        upcasts on read.
+        """
+        from datadog_api_client import ApiClient, Configuration
+        from datadog_api_client.v2.api.service_definition_api import (
+            ServiceDefinitionApi,
+        )
+
+        configuration = Configuration()
+        configuration.api_key["apiKeyAuth"] = self._api_key
+        configuration.api_key["appKeyAuth"] = self._app_key
+        configuration.server_variables["site"] = self._site
+        api = ServiceDefinitionApi(ApiClient(configuration))
+
+        try:
+            response = api.list_service_definitions(schema_version=schema_version)
+        except Exception as exc:  # pragma: no cover - network/SDK errors
+            raise IngestionError("datadog", "list_service_definitions failed", cause=exc) from exc
+
+        for item in getattr(response, "data", []) or []:
+            parsed = _to_service_definition(item)
+            if parsed is not None:
+                yield parsed
+
 
 def _next_cursor(response: Any) -> str | None:
     meta = getattr(response, "meta", None)
@@ -240,3 +311,93 @@ def _tags_to_dict(tags: list[str]) -> dict[str, str]:
         key, _, value = tag.partition(":")
         out[key.strip()] = value.strip()
     return out
+
+
+def _to_service_definition(item: Any) -> RawServiceDefinition | None:
+    """Normalize one ServiceDefinitionData SDK object into our shape.
+
+    Defensive on every field because the schema version of the source
+    (`v2`, `v2.1`, `v2.2`) is up to whoever wrote the service.yaml,
+    and not every field exists in every version.
+    """
+    attrs = getattr(item, "attributes", None)
+    if attrs is None:
+        return None
+    schema = getattr(attrs, "schema", None)
+    if schema is None:
+        return None
+    schema_dict = _to_plain_dict(schema)
+    service_name = str(schema_dict.get("dd-service") or schema_dict.get("dd_service") or "")
+    if not service_name:
+        return None
+
+    contacts = tuple(_normalize_contact(c) for c in (schema_dict.get("contacts") or []))
+    links_list = schema_dict.get("links") or []
+    links: dict[str, str] = {}
+    for link in links_list:
+        link_d = _to_plain_dict(link)
+        name = str(link_d.get("name") or link_d.get("type") or "").strip()
+        url = str(link_d.get("url") or "").strip()
+        if name and url:
+            links[name] = url
+    repos = tuple(_to_plain_dict(r) for r in (schema_dict.get("repos") or []))
+
+    languages_raw = schema_dict.get("languages") or []
+    if isinstance(languages_raw, str):
+        languages: tuple[str, ...] = (languages_raw,)
+    else:
+        languages = tuple(str(lang) for lang in languages_raw if lang)
+
+    owner_email = ""
+    for contact in contacts:
+        # First email-typed contact wins; everything else stays in contacts.
+        if (contact.get("type") or "").lower() == "email" and contact.get("contact"):
+            owner_email = str(contact["contact"])
+            break
+
+    return RawServiceDefinition(
+        service_name=service_name,
+        team=str(schema_dict.get("team") or ""),
+        tier=str(schema_dict.get("tier") or ""),
+        lifecycle=str(schema_dict.get("lifecycle") or ""),
+        application=str(schema_dict.get("application") or ""),
+        description=str(schema_dict.get("description") or ""),
+        languages=languages,
+        owner_email=owner_email,
+        repos=repos,
+        links=links,
+        contacts=contacts,
+        schema_version=str(schema_dict.get("schema-version") or schema_dict.get("schema_version") or ""),
+        raw=schema_dict,
+    )
+
+
+def _to_plain_dict(value: Any) -> dict[str, Any]:
+    """The SDK gives us model instances; we want plain dicts so the
+    payload can round-trip through JSON without bespoke serialization.
+    Falls back to `dict(value)` and finally `{}`."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            d = to_dict()
+            if isinstance(d, dict):
+                return d
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return dict(value)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _normalize_contact(value: Any) -> dict[str, str]:
+    d = _to_plain_dict(value)
+    return {
+        "name": str(d.get("name") or ""),
+        "type": str(d.get("type") or ""),
+        "contact": str(d.get("contact") or ""),
+    }

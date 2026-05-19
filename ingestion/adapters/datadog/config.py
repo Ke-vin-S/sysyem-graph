@@ -36,6 +36,10 @@ class DatadogAdapterConfig:
     again. Default 5 minutes; bump higher to cache for the whole working
     session, lower to fetch every run."""
 
+    catalog_ttl_seconds: int = 3600
+    """How long the Service Catalog stays fresh. Definitions change rarely
+    so the default is 1 hour — orders of magnitude longer than spans."""
+
     store_path: str = "./out/datadog.db"
     """On-disk SQLite path for the staging store. `:memory:` for tests."""
 
@@ -51,5 +55,6 @@ class DatadogAdapterConfig:
             lookback_hours=settings.trace_lookback_hours,
             env=settings.env,
             spans_ttl_seconds=settings.spans_ttl_seconds,
+            catalog_ttl_seconds=settings.catalog_ttl_seconds,
             store_path=settings.store_path,
         )

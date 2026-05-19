@@ -84,3 +84,43 @@ class DatadogFetcher:
         )
         logger.info("datadog_fetcher: wrote %d spans in %.0fms", count, duration_ms)
         return count
+
+    def fetch_catalog(self, *, schema_version: str = "v2.2") -> int:
+        """Pull the full Service Catalog into the store. Returns the count
+        of definitions written.
+
+        The catalog is small (one row per service, usually tens to
+        hundreds total) so we always upsert the whole list — no
+        pagination, no incremental sync. The TTL controls how often we
+        do this (default 1h, set via per-API config).
+        """
+        t0 = time.perf_counter()
+        fetched_at = datetime.now(timezone.utc)
+        logger.info("datadog_fetcher: fetching service catalog (schema=%s)", schema_version)
+        try:
+            defs_iter = self._client.list_service_definitions(schema_version=schema_version)
+            count = self._store.insert_service_definitions(defs_iter, fetched_at=fetched_at)
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - t0) * 1000
+            self._store.record_fetch(
+                api="catalog",
+                rows_written=0,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+                duration_ms=duration_ms,
+                fetched_at=fetched_at,
+            )
+            if isinstance(exc, IngestionError):
+                raise
+            raise IngestionError("datadog", "service catalog fetch failed", cause=exc) from exc
+
+        duration_ms = (time.perf_counter() - t0) * 1000
+        self._store.record_fetch(
+            api="catalog",
+            rows_written=count,
+            status="success",
+            duration_ms=duration_ms,
+            fetched_at=fetched_at,
+        )
+        logger.info("datadog_fetcher: wrote %d catalog entries in %.0fms", count, duration_ms)
+        return count
