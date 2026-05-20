@@ -2,7 +2,53 @@
 
 This document describes the design that's actually built today (Phase 1 + Phase 1.5). The original 13-week roadmap lives in `complete_system_design.md` and `QUICK_REFERENCE.md`; what follows is the concrete implementation, the *why* behind the structural choices, and the seams you'd extend.
 
-If you only have five minutes, read [§2 The Pipeline](#2-the-pipeline) and [§6 End-to-End Flow](#6-end-to-end-flow-analyzing-a-repo).
+If you only have five minutes, read [§2 The Pipeline](#2-the-pipeline) and [§6 End-to-End Flow](#6-end-to-end-flow-analyzing-a-repo). Diagrams in this doc are Mermaid — they render inline on GitHub and in most Markdown viewers.
+
+### System at a glance
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        DD[Datadog APM<br/>spans + catalog]
+        GH[GitHub remotes<br/>git clone]
+        FS[Local filesystem<br/>fixture / monorepo]
+    end
+
+    subgraph Staging["SQLite staging stores<br/>(per-adapter; see §7)"]
+        DDDB[(datadog.db<br/>spans + catalog<br/>fetch_log)]
+        GHDB[(github.db<br/>repos<br/>+ SHA cache)]
+    end
+
+    subgraph Adapters["Ingestion adapters"]
+        DDAd[DatadogAdapter<br/>priority 100]
+        GHAd[GitHubAdapter<br/>priority 80]
+        TPAd[TestParserAdapter<br/>priority 70]
+    end
+
+    DD --> DDAd
+    DDAd <--> DDDB
+    GH --> GHAd
+    GHAd <--> GHDB
+    FS --> TPAd
+
+    DDAd --> Reg[AdapterRegistry<br/>+ ResultMerger<br/>+ Validator]
+    GHAd --> Reg
+    TPAd --> Reg
+
+    Reg --> Out[./out/*.json<br/>merged records]
+    Out --> Loader[GraphLoader<br/>MERGE on stable IDs]
+    Loader --> Neo[(Neo4j<br/>authoritative<br/>impact graph)]
+
+    classDef store fill:#fde8c4,stroke:#c08a3e;
+    class DDDB,GHDB store;
+    classDef primary fill:#cfe6ff,stroke:#1e5a99;
+    class Neo primary;
+```
+
+Two persistence layers, two roles:
+
+* **SQLite staging stores** (one per adapter that needs caching) hold raw upstream data — Datadog spans, registered GitHub repos and their SHAs. They exist so we can re-parse / re-walk without re-burning API quota or re-cloning. Schema lives next to the adapter that owns it.
+* **Neo4j** is the single authoritative graph: cross-adapter records, MERGEd on stable IDs, queried for impact analysis. Adapters never write here directly — only the loader does, after merge + validation.
 
 ---
 
@@ -22,20 +68,23 @@ Later phases (Neo4j loader, rule engine, test selector, FastAPI, webhook, dashbo
 
 Phase 1.5's central insight: **separate fact extraction from meaning, and treat framework knowledge as data, not code.**
 
-```
-frameworks/*.yaml ─┐
-                   │
-                   ▼
-            ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
-   files ──▶│   Walker     │ Facts ─▶│  Resolvers   │ ──────▶ │  core/types  │
-            │  + Grammars  │ tree    │  + Profile   │ records │  domain objs │
-            └──────┬───────┘         └──────┬───────┘         └──────────────┘
-                   │                        │
-                   │ unknown lang           │ stuck subgraph
-                   ▼                        ▼
-            ┌──────────────┐         ┌──────────────┐
-            │  LLMGrammar  │         │  LLM resolve │  (both optional; default = NullClient)
-            └──────────────┘         └──────────────┘
+```mermaid
+flowchart LR
+    YAML[frameworks/*.yaml<br/>framework knowledge]
+    Files[source files]
+
+    Files --> Walker[Walker + Grammars]
+    Walker -->|FactTree| Resolvers[Resolvers<br/>+ Profile overlays]
+    YAML --> Resolvers
+    Resolvers -->|typed records| Types[core/types<br/>Service / Endpoint /<br/>TestCase / Connection]
+
+    Walker -. unknown language .-> LLMG[LLMGrammar<br/>optional]
+    LLMG -.-> Walker
+    Resolvers -. stuck subgraph .-> LLMR[LLM resolve<br/>optional]
+    LLMR -.-> Resolvers
+
+    classDef opt fill:#f4f4f4,stroke:#888,stroke-dasharray:4 3;
+    class LLMG,LLMR opt;
 ```
 
 Three stages:
@@ -81,8 +130,8 @@ This split also makes the LLM layer cheap: the LLM doesn't have to "read the cod
 | `core/adapters/` | Adapter framework (unchanged from Phase 1) | `base.py` (`IngestionAdapter` ABC), `registry.py`, `merger.py`, `validator.py`, `mapper.py`, `confidence_scorer.py` |
 | `core/config/` | Env-driven settings | `settings.py` (`Neo4jSettings`, `DatadogSettings`, `GitHubSettings`, `TestParserSettings`) |
 | `ingestion/grammars/` | Per-language fact extractors | `python_grammar.py`, `java_grammar.py`, `config_grammar.py`, `llm_grammar.py`, `grammar.py` (ABC) |
-| `ingestion/adapters/datadog/` | APM trace ingestion (bypasses Walker — its input is spans, not files) | `adapter.py`, `client.py`, `trace_parser.py` |
-| `ingestion/adapters/github/` | GitHub fetch + walker/resolver pipeline | `adapter.py`, `client.py`, `repo_fetcher.py` |
+| `ingestion/adapters/datadog/` | APM trace ingestion (bypasses Walker — its input is spans, not files) | `adapter.py`, `client.py`, `trace_parser.py`, `fetcher.py`, `parser.py`, `store.py`, `migrations/` |
+| `ingestion/adapters/github/` | Clone-based ingestion + SHA cache + walker/resolver pipeline | `adapter.py`, `service.py`, `cloner.py`, `store.py`, `repo_fetcher.py`, `migrations/` |
 | `ingestion/adapters/testparser/` | Local filesystem walker/resolver pipeline | `adapter.py`, `config.py` |
 | `frameworks/` (repo root) | YAML knowledge base | `python.yaml`, `java.yaml`, `fastapi.yaml`, `flask.yaml`, `spring.yaml`, `pytest.yaml` |
 
@@ -137,44 +186,95 @@ sg-ingest run --out ./out
 
 ### 6.2 Three adapter inputs, one shared pipeline downstream
 
-**DatadogAdapter** — different shape because the input is API spans, not files.
+**DatadogAdapter** — different shape because the input is API spans, not files. Uses the [staging store](#7-staging-stores-the-second-db) to decouple fetch from parse.
 
+```mermaid
+sequenceDiagram
+    participant Adapter as DatadogAdapter
+    participant Store as DatadogStore<br/>(./out/datadog.db)
+    participant API as Datadog API
+    participant Parser as TraceParser
+
+    Adapter->>Store: is_stale("spans", ttl)?
+    alt cache stale
+        Adapter->>API: SpansApi.list_spans(lookback, query)
+        API-->>Adapter: spans batch (paginated)
+        Adapter->>Store: insert_spans(...)
+        Adapter->>Store: record_fetch(api="spans", status=success)
+    else fresh
+        Note over Adapter,Store: skip API call
+    end
+
+    Adapter->>Store: is_stale("catalog", ttl)?
+    opt cache stale
+        Adapter->>API: ServiceDefinitionApi.list(...)
+        API-->>Adapter: service definitions
+        Adapter->>Store: insert_service_definitions(...)
+    end
+
+    Adapter->>Store: read_spans(since, until, env)
+    Store-->>Parser: spans iterator
+    Parser->>Parser: bucket by (source, target, endpoint)
+    Parser-->>Adapter: Service[] + ExternalConnection[]
 ```
-DatadogClient.list_spans(lookback_hours, query)         # ingestion/adapters/datadog/client.py
-  ↓
-TraceParser.parse(spans)                                # ingestion/adapters/datadog/trace_parser.py
-  ├─ bucket spans by (source_service, target_service, endpoint)
-  ├─ Service per distinct service seen
-  └─ ExternalConnection per bucket with frequency / error rate / criticality
+
+No Walker, no Facts, no Resolvers. Datadog tells us *what actually got called in production*; the source-code adapters tell us *what exists statically*. The fetch/parse split lets you iterate on parser logic (`sg-ingest datadog-parse`) without re-pulling spans.
+
+**GitHubAdapter** — clones repos shallowly into a local cache, then hands the on-disk path to the shared pipeline. The metadata store (`./out/github.db`) remembers the SHA we last ingested per repo so unchanged remotes are skipped entirely.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as sg-ingest github
+    participant Svc as GitHubService
+    participant Store as GitHubStore<br/>(./out/github.db)
+    participant Cloner as RepoCloner<br/>(GitPython)
+    participant Remote as remote (origin)
+    participant Fetcher as RepoFetcher
+    participant Walker
+
+    User->>CLI: ingest --all
+    Svc->>Store: list_repos()
+    loop for each registered URL
+        Svc->>Store: get_repo(url)
+        Store-->>Svc: RepoRecord(last_commit_sha)
+        Svc->>Cloner: clone_or_update(url, prev_sha)
+        alt clone missing
+            Cloner->>Remote: git clone --depth=1
+        else update
+            Cloner->>Remote: git fetch --depth=1
+            alt SHA moved
+                Cloner->>Cloner: git reset --hard origin/HEAD
+            end
+        end
+        Cloner-->>Svc: (path, sha, changed)
+        Svc->>Store: record_clone(sha)
+        alt was_stale OR sha != last_ingested_sha
+            Svc->>Fetcher: to_records_from_path(path, repo_id)
+            Fetcher->>Walker: walk(path, repo_id)
+            Walker-->>Fetcher: FactTree
+            Fetcher-->>Svc: Service + CodeArtifacts
+            Svc->>Store: record_ingest(sha)
+        else
+            Note over Svc,Store: cache hit — skip walk
+        end
+    end
 ```
 
-No Walker, no Facts, no Resolvers. Datadog tells us *what actually got called in production*; the source-code adapters tell us *what exists statically*.
+Key properties:
 
-**GitHubAdapter** — fetches remote, writes to temp dir, then uses the shared pipeline.
+* **Idempotent.** Re-running with no upstream change is a no-op (the staging store's `last_ingested_sha == last_commit_sha` check fires before the walk; the loader's `MERGE (n {id: …})` would absorb duplicates anyway, but we avoid the work).
+* **Two-phase commit.** `record_clone` runs as soon as we know the SHA; `record_ingest` only runs after records have been built. A crash between the two leaves the next run with `last_ingested_sha != last_commit_sha` and it retries.
+* **Token hygiene.** When `GITHUB_TOKEN` is set, it's injected at fetch time (`https://x-access-token:<token>@github.com/…`) and scrubbed from `.git/config` immediately after. It never persists on disk.
 
-```
-GitHubClient.fetch_repo(full_name)                      # ingestion/adapters/github/client.py
-  ├─ PyGithub.get_repo + get_git_tree(recursive=True)
-  ├─ filter by file_extensions + max_file_bytes
-  └─ get_contents per blob → RepoSnapshot
-
-RepoFetcher.to_records(snapshot)                        # ingestion/adapters/github/repo_fetcher.py
-  ├─ service_from_snapshot → Service record
-  ├─ write snapshot.files into TemporaryDirectory
-  ├─ Walker.walk(tmp_dir, repo_id)         ┐
-  ├─ detect_frameworks(tree, library)      │  the shared pipeline, §6.3
-  ├─ EndpointResolver.resolve(ctx)         │
-  └─ → CodeArtifact records (endpoint + function)
-```
-
-**TestParserAdapter** — walks a local filesystem path containing one or more checked-out repos as subdirectories.
+**TestParserAdapter** — walks a local filesystem path containing one or more checked-out repos as subdirectories. No staging store; the source-of-truth is your working tree.
 
 ```
 TestParserAdapter.extract(ctx)                          # ingestion/adapters/testparser/adapter.py
-  ├─ _discover_repos(root, context.repos) — subdirectories = repos
+  ├─ _discover_repos(root, context.repos) — auto-detect single-repo vs parent-of-repos
   └─ for each repo_dir:
         ├─ Walker.walk(repo_dir, repo_id)   ┐
-        ├─ detect_frameworks(tree, library) │  same shared pipeline
+        ├─ detect_frameworks(tree, library) │  same shared pipeline as GitHub
         ├─ TestResolver.resolve(ctx)        │
         └─ result.tests.extend(tests)
 ```
@@ -362,7 +462,117 @@ The CLI writes `merged` to `./out/{services,connections,artifacts,tests}.json` a
 
 ---
 
-## 7. End-to-end example, traced
+## 7. Staging stores (the "second DB")
+
+Two persistence layers coexist by design:
+
+| Layer | Lives at | Owner | Role |
+|---|---|---|---|
+| **Neo4j** | `bolt://…` | `core/graph/loader.py` | One authoritative impact graph. Merged from all adapters. MERGE on stable IDs — idempotent re-load. |
+| **SQLite staging stores** | `./out/*.db` (one file per adapter) | each adapter's `store.py` | Raw upstream data, kept locally so parsing can be replayed without re-hitting the source. |
+
+Why a second DB at all? Three concrete problems it solves:
+
+1. **API quota.** Datadog charges by query. Pulling 24h of spans takes minutes; iterating on the parser would burn the same quota over and over. The staging store lets `datadog-fetch` run once and `datadog-parse` run a thousand times.
+2. **Network cost.** A real-world `git clone` of a large monorepo can be hundreds of MB. The SHA cache lets us skip the whole walk when the remote hasn't moved.
+3. **Replay + audit.** A bug in a resolver should be reproducible offline. Holding the raw inputs locally — span by span, file by file — turns parser bugs into unit tests instead of "I'll go pull yesterday's data again".
+
+### 7.1 Common shape
+
+Each adapter that needs caching ships its own SQLite file plus a `migrations/` directory of numbered `.sql` files. The runner is the same in every adapter (`store.py:_run_migrations` mirrors across the package):
+
+```mermaid
+flowchart TB
+    Open[GitHubStore('./out/github.db')]
+    Open --> Check{_migrations<br/>table exists?}
+    Check -- no --> Apply1[Apply 0001_init.sql<br/>record version=1]
+    Apply1 --> Loop
+    Check -- yes --> Loop[For each NNNN_*.sql<br/>not in _migrations]
+    Loop --> Apply[executescript<br/>+ INSERT version]
+    Apply --> Loop
+    Loop --> Done[ready]
+
+    classDef sql fill:#fde8c4,stroke:#c08a3e;
+    class Open,Apply1,Apply sql;
+```
+
+Key choices:
+
+* **File-based, versioned migrations.** New schema = new `NNNN_<name>.sql`. The runner skips ones it has already applied. `CREATE … IF NOT EXISTS` everywhere so a crash mid-migration self-heals on the next run.
+* **WAL + autocommit.** Disk-backed stores get `PRAGMA journal_mode = WAL` for crash safety; `:memory:` stores are the default in tests.
+* **Single-process.** Not safe to share a connection across threads or processes — open one per pipeline run, close it at the end.
+
+### 7.2 DatadogStore — `./out/datadog.db`
+
+Tables (see `ingestion/adapters/datadog/migrations/`):
+
+| Table | Purpose | Key |
+|---|---|---|
+| `_migrations` | applied schema versions | `version INT PK` |
+| `fetch_log` | one row per API fetch attempt (success or failure) | `(api, fetched_at)` — drives the TTL check |
+| `spans` | raw APM spans buffered for parsing | `(trace_id, span_id) PK` — idempotent re-fetch |
+| `services_catalog` | declared service metadata (team/tier/links) | `service_name PK` |
+
+**Freshness model: TTL.** A successful fetch row in `fetch_log` is "fresh" for `DD_SPANS_TTL_SECONDS` (default 5 min) or `DD_CATALOG_TTL_SECONDS` (default 1 h). `store.is_stale("spans", ttl)` returns False during that window and the adapter skips the API call. Failed fetches don't count — the next run retries.
+
+```mermaid
+flowchart LR
+    Tick[ingest run] --> Stale{is_stale<br/>spans, 5m?}
+    Stale -- yes --> Fetch[DatadogClient<br/>list_spans] --> Insert[(insert_spans<br/>+ record_fetch)]
+    Stale -- no --> Skip[skip API call]
+    Insert --> Parse[TraceParser.parse]
+    Skip --> Parse
+    Parse --> Out[Service[] +<br/>ExternalConnection[]]
+```
+
+### 7.3 GitHubStore — `./out/github.db`
+
+One table, one job: remember what we've already done with each repo.
+
+| Column | Why |
+|---|---|
+| `url` (PK) | Canonical `https://github.com/owner/name` |
+| `owner`, `name` | Derived from URL; used for the on-disk clone path |
+| `default_branch` | Override remote HEAD when set |
+| `clone_path` | Absolute path of the working copy |
+| `last_commit_sha` | What `git fetch` last observed at `origin/HEAD` |
+| `last_ingested_sha` | The SHA whose facts were successfully merged into the merged result. **Only advances after a successful walk** |
+| `last_ingested_at` | When that happened |
+| `status` | `registered` → `cloned` → `ingested`, or `error` |
+| `last_error` | Last `clone_or_update` failure, for diagnostics |
+
+**Freshness model: SHA, not time.** Unlike Datadog (where new spans arrive every second), a GitHub repo only changes when someone pushes — there's no useful "stale after N minutes". The check is: *did `origin/HEAD` move since we last successfully ingested this repo?*
+
+```mermaid
+flowchart LR
+    Run[github ingest] --> Fetch[git fetch --depth=1]
+    Fetch --> Cmp{remote SHA<br/>== last_ingested_sha?}
+    Cmp -- yes --> Skip[skip walk]
+    Cmp -- no --> Reset[git reset --hard<br/>origin/HEAD]
+    Reset --> RC[(record_clone<br/>SHA)]
+    RC --> Walk[Walker + Resolvers]
+    Walk --> Records[Service + CodeArtifacts]
+    Records --> RI[(record_ingest<br/>SHA)]
+```
+
+The split between `record_clone` (advances `last_commit_sha`) and `record_ingest` (advances `last_ingested_sha`) is what makes the flow crash-safe: a partial run leaves the two out of sync, and the next run retries the walk without re-cloning.
+
+### 7.4 What the two stores have in common
+
+| | DatadogStore | GitHubStore |
+|---|---|---|
+| Freshness | TTL on `fetch_log` (`is_stale`) | SHA equality (`last_commit_sha == last_ingested_sha`) |
+| Idempotent re-fetch | `INSERT OR REPLACE` on `(trace_id, span_id)` | `git fetch` + `record_clone(sha)` — same SHA = same row |
+| Where it lives | `./out/datadog.db` (configurable) | `./out/github.db` (configurable) |
+| Replay command | `sg-ingest datadog-parse` | `sg-ingest github ingest --all` (cache-hit = no-op) |
+| Tests use | `:memory:` (default in `DatadogStore()`) | `:memory:` (default in `GitHubStore()`) |
+| Lifecycle | Single pipeline run | Survives across runs; CLI controls it (`add`/`remove`/`clean`) |
+
+Neither store is the source of truth for the graph. Both are caches in front of an external source — Datadog APIs in one case, git remotes in the other. The authoritative graph is always Neo4j, and both stores can be deleted at any time without data loss (you'll just re-do the work).
+
+---
+
+## 8. End-to-end example, traced
 
 Input: a FastAPI repo at `./payment-service/`:
 
@@ -406,9 +616,9 @@ Walking produces (selected facts):
 
 ---
 
-## 8. Extension points
+## 9. Extension points
 
-### 8.1 Add a new language
+### 9.1 Add a new language
 
 Drop a single YAML, optionally a `Grammar`.
 
@@ -418,7 +628,7 @@ Drop a single YAML, optionally a `Grammar`.
 
 No edits to resolvers, classifiers, or adapters.
 
-### 8.2 Add a new web framework
+### 9.2 Add a new web framework
 
 Drop a YAML. No code.
 
@@ -429,7 +639,7 @@ Drop a YAML. No code.
    - `routes.base_path_sources:` — where the app's root path comes from (constructor kwarg or config key).
 2. Run tests. `EndpointResolver` picks it up automatically.
 
-### 8.3 Add a new resolver
+### 9.3 Add a new resolver
 
 Examples that would be valuable next: `ExternalCallResolver` (find `httpx.get(...)` call sites and link them to `ExternalConnection` records), `ServiceResolver` (infer the Service record from package metadata), `SchemaResolver` (extract Protobuf/OpenAPI schemas).
 
@@ -443,7 +653,7 @@ class MyResolver:
 
 Each resolver should attach a `derivation` tuple of fact IDs to every emitted record.
 
-### 8.4 Wire a real LLM provider
+### 9.4 Wire a real LLM provider
 
 The slots are already plumbed; today they all use `NullClient` (`core/llm/null_client.py`):
 
@@ -462,7 +672,7 @@ To activate:
 4. Budget caps live on `LLMBudget` (`core/llm/budgets.py`): `max_files_per_run`, `max_tokens_per_run`, `max_dollars_per_run`, `fail_open=True` (budget hit → return deterministic-only).
 5. Caching is content-addressed (`core/llm/cache.py:FileCache`): the same `(prompt_version, content)` always returns the same response. Cache lives at `.system-graph/llm-cache/` (gitignored).
 
-### 8.5 Per-repo overlays (in-house framework conventions)
+### 9.5 Per-repo overlays (in-house framework conventions)
 
 `RepoOverlay` (`core/frameworks/overlay.py`) is additive: it never replaces stock framework values, only adds to them. Either an LLM profile-learner produces it, or you hand-write a YAML.
 
@@ -478,7 +688,7 @@ test_annotations: ["acme.testing.flaky"] # treat custom marker as a test marker
 
 ---
 
-## 9. What's not built yet
+## 10. What's not built yet
 
 This is Phase 1 + 1.5 only. Pending phases (see `QUICK_REFERENCE.md` for the full roadmap):
 
@@ -499,7 +709,7 @@ Within Phase 1.5 itself, these are queued follow-ups:
 
 ---
 
-## 10. Quick file index
+## 11. Quick file index
 
 If you're trying to understand a specific behavior, here's where to look:
 
@@ -513,6 +723,8 @@ If you're trying to understand a specific behavior, here's where to look:
 | How are tests classified? | `core/resolvers/test_resolver.py` |
 | What filters the file walk? | `core/walker/walker.py:WalkerConfig` |
 | How does GitHub turn a repo into facts? | `ingestion/adapters/github/repo_fetcher.py` |
+| How are clones cached + refreshed? | `ingestion/adapters/github/cloner.py`, `service.py`, `store.py` |
+| How does Datadog avoid re-burning quota? | `ingestion/adapters/datadog/store.py` (fetch_log + TTL) |
 | How does the local-filesystem path work? | `ingestion/adapters/testparser/adapter.py` |
 | Where do Datadog spans become connections? | `ingestion/adapters/datadog/trace_parser.py` |
 | Why does the registry not blow up on one bad adapter? | `core/adapters/registry.py:run_all` |
@@ -520,13 +732,13 @@ If you're trying to understand a specific behavior, here's where to look:
 
 ---
 
-## 11. Running the system
+## 12. Running the system
 
 ```bash
 make dev              # create .venv and install runtime + dev deps
 cp .env.example .env  # then fill in DD_API_KEY, GITHUB_TOKEN, TESTPARSER_ROOT, …
 make neo4j-up         # boot Neo4j locally on bolt://localhost:7687
-make test             # run pytest (57 tests today)
+make test             # run pytest (354 tests today)
 sg-ingest run         # full ingestion; writes ./out/*.json
 ```
 
