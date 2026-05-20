@@ -103,7 +103,7 @@ class GitHubAdapter(IngestionAdapter):
                 continue
 
             try:
-                service_record, artifacts = self._fetcher.to_records_from_path(
+                services_emitted, artifacts = self._fetcher.to_records_from_path(
                     fresh.path, repo_id=_repo_id(url), repo_url=url
                 )
             except Exception as exc:
@@ -111,7 +111,7 @@ class GitHubAdapter(IngestionAdapter):
                     "github", f"failed to walk clone for {url}", cause=exc
                 ) from exc
 
-            result.services.append(service_record)
+            result.services.extend(services_emitted)
             result.artifacts.extend(artifacts)
             self._service.record_ingest(url, sha=fresh.sha, at=context.now)
             scanned += 1

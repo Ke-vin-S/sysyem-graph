@@ -1,0 +1,31 @@
+name: c
+file_extensions: [".c", ".h"]
+
+grammar:
+  kind: native
+  driver: core.languages.c.grammar.CGrammar
+
+module_resolution:
+  separator: "/"
+  candidate_path_templates:
+    - "{module}"
+    - "{module}.h"
+    - "{module}.c"
+
+package_aggregator:
+  files: []
+
+visibility:
+  rule: c_static_means_file_local
+
+test_paths:
+  function_name_prefixes: ["test_"]
+  glob_patterns:
+    - "**/tests/**/*.c"
+    - "**/test_*.c"
+
+notes: |
+  Regex-based grammar. Handles plain C only — C++ classes / templates are
+  not parsed (the grammar conservatively skips files that look like C++).
+  Function-pointer assignments and macro-defined functions appear as plain
+  calls in v1; resolvers filter unresolved noise.

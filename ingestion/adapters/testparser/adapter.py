@@ -42,6 +42,8 @@ from core.resolvers import (
     ResolverContext,
     TestResolver,
 )
+from core.config import OracleStackSettings
+from core.resolvers.forms_service_resolver import extract_forms_services
 from core.types import CodeArtifact, Endpoint, LineRange, Service, TestCase
 from core.types.errors import IngestionError
 from core.walker import Walker
@@ -164,6 +166,16 @@ class TestParserAdapter(IngestionAdapter):
         # 1. Service node for this repo. Language is the majority extension.
         service = self._build_service(repo_dir, tree, detected, context.now)
         result.services.append(service)
+
+        # 1b. Oracle Forms services — additional Service per `.fmb`/`.fmx`
+        # file detected in this repo, plus any names listed in
+        # `ORACLE_FORMS_APPS`. Each becomes a node with language='oracle_forms'.
+        forms_extras = OracleStackSettings().forms_apps
+        result.services.extend(
+            extract_forms_services(
+                tree, repo_id=repo_id, extras=forms_extras, now=context.now,
+            )
+        )
 
         # 2. Code structure artifacts (functions/classes/methods) — keyed by
         #    paths relative to the repo root so they match coverage lookups.

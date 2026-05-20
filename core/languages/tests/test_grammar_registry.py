@@ -20,12 +20,13 @@ def test_build_grammars_loads_native_drivers() -> None:
     assert "ConfigGrammar" in types
 
 
-def test_llm_grammar_claims_plsql_extensions() -> None:
+def test_no_native_languages_use_llm_grammar() -> None:
+    """Every shipped language has a native grammar — LLMGrammar is only
+    instantiated when at least one language sets `grammar.kind=llm`. None
+    of the v1 shipped languages do, so the registry should emit no LLMGrammar."""
     grammars = build_grammars(load_library(DEFAULT_LANGUAGES_DIR))
     llms = [g for g in grammars if isinstance(g, LLMGrammar)]
-    assert len(llms) == 1
-    # PL/SQL contributes .sql/.pks/.pkb to the LLMGrammar's claimed suffixes.
-    assert set(llms[0].suffixes) >= {".sql", ".pks", ".pkb"}
+    assert llms == []
 
 
 def test_native_grammar_matches_its_extension() -> None:
@@ -42,9 +43,9 @@ def test_native_grammar_matches_its_extension() -> None:
     assert cfg_g.matches(Path("application.yml"))
 
 
-def test_walker_routes_plsql_through_llm_grammar(tmp_path) -> None:
-    """End-to-end: a .pks file routes to LLMGrammar (NullClient → 0 facts)
-    without crashing the walk."""
+def test_walker_routes_plsql_through_native_grammar(tmp_path) -> None:
+    """End-to-end: a `.pks` file routes to the native `PlSqlGrammar` and
+    produces structural facts (package, procedure, ...) without crashing."""
     from core.languages.grammar_registry import build_grammars
     from core.walker import Walker
 
@@ -59,7 +60,10 @@ def test_walker_routes_plsql_through_llm_grammar(tmp_path) -> None:
     grammars = build_grammars(load_library(DEFAULT_LANGUAGES_DIR))
     walker = Walker(grammars=grammars)
     tree = walker.walk(tmp_path, repo_id="r")
-    # The Python file produces facts; the .pks file produces 0 (NullClient).
     files = set(tree.files())
     assert any(f.endswith("main.py") for f in files)
-    # The walk completed without raising.
+    assert any(f.endswith("charges.pks") for f in files)
+    # Native grammar emits a CLASS_DEF for the PACKAGE.
+    from core.facts import FactKind
+    class_defs = tree.where(kind=FactKind.CLASS_DEF)
+    assert any(f.data.get("name") == "charges" for f in class_defs)

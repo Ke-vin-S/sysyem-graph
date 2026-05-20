@@ -21,10 +21,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.config import OracleStackSettings
 from core.facts import FactKind
 from core.frameworks import compose, detect_frameworks, load_library
 from core.frameworks.library import DEFAULT_FRAMEWORKS_DIR, FrameworkLibrary
 from core.resolvers import EndpointResolver, ResolverContext
+from core.resolvers.forms_service_resolver import extract_forms_services
 from core.types import CodeArtifact, LineRange, Service
 from core.walker import Walker
 
@@ -73,14 +75,26 @@ class RepoFetcher:
         *,
         repo_id: str,
         repo_url: str = "",
-    ) -> tuple[Service, list[CodeArtifact]]:
-        meta = derive_metadata(root, repo_id=repo_id, repo_url=repo_url)
-        service = service_from_metadata(meta)
-        artifacts = self._artifacts(root, repo_id=repo_id)
-        return service, artifacts
+    ) -> tuple[list[Service], list[CodeArtifact]]:
+        """Return Service(s) + CodeArtifacts for a cloned repo.
 
-    def _artifacts(self, root: Path, *, repo_id: str) -> list[CodeArtifact]:
+        Returns a list of Services: the primary one (the repo itself) plus
+        any Oracle Forms apps detected via `.fmb`/`.fmx` files or
+        `ORACLE_FORMS_APPS` config."""
+        meta = derive_metadata(root, repo_id=repo_id, repo_url=repo_url)
         tree = self._walker.walk(root, repo_id=repo_id)
+        primary_service = service_from_metadata(meta)
+        artifacts = self._artifacts_from_tree(tree, root=root, repo_id=repo_id)
+        forms_services = extract_forms_services(
+            tree,
+            repo_id=repo_id,
+            extras=OracleStackSettings().forms_apps,
+        )
+        return [primary_service, *forms_services], artifacts
+
+    def _artifacts_from_tree(
+        self, tree, *, root: Path, repo_id: str
+    ) -> list[CodeArtifact]:
         detected = detect_frameworks(tree, self._library)
         effective = tuple(compose(fw, None) for fw in detected)
         endpoints = self._resolver.resolve(

@@ -1,0 +1,29 @@
+name: proc_c
+file_extensions: [".pc", ".pcc"]
+
+grammar:
+  kind: native
+  driver: core.languages.proc_c.grammar.ProCGrammar
+
+module_resolution:
+  separator: "/"
+  candidate_path_templates:
+    - "{module}"
+    - "{module}.h"
+    - "{module}.pc"
+
+package_aggregator:
+  files: []
+
+visibility:
+  rule: c_static_means_file_local
+
+test_paths:
+  function_name_prefixes: ["test_"]
+  glob_patterns:
+    - "**/tests/**/*.pc"
+
+notes: |
+  Pro*C = C with `EXEC SQL ... ;` blocks. We don't run Oracle's `proc`
+  preprocessor. The C surface is delegated to CGrammar (after blanking
+  out the SQL regions); the SQL surface emits SQL_STATEMENT facts.

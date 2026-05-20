@@ -56,6 +56,26 @@ class FactKind(StrEnum):
     """A reference to a type by name. Used by resolvers when a class declaration
     lives in one file but a controller annotation refers to it."""
 
+    SQL_STATEMENT = "sql_statement"
+    """An SQL statement — embedded `EXEC SQL …` in Pro*C, inline DML in
+    PL/SQL procedure bodies, or `sqlplus … @script.sql` in shell scripts.
+
+    `data` shape:
+      operation: str            # select | insert | update | delete | merge |
+                                # truncate | call | execute | script
+      tables: list[str]         # tables / views touched (lowercased,
+                                # `schema.name` preserved verbatim)
+      target_proc: str          # for `CALL` / `EXECUTE PROCEDURE` /
+                                # `sqlplus @file.sql` — the procedure or
+                                # script being invoked; empty otherwise
+      enclosing_symbol: str     # name of the function/procedure containing
+                                # this statement, when the grammar can infer
+                                # it cheaply; resolvers fall back to
+                                # `tree.symbol_at(file, line)`
+      raw: str                  # the original SQL text (truncated to ~200
+                                # chars), useful for diagnostics
+    """
+
     ASSIGNMENT = "assignment"
     """A name-binding statement: `x = expr`, `self.x = expr`, `x: T = expr`.
 

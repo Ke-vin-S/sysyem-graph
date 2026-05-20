@@ -1,0 +1,27 @@
+name: oracle_forms
+file_extensions: [".fmb", ".fmx"]
+
+grammar:
+  kind: native
+  driver: core.languages.oracle_forms.grammar.FormsGrammar
+
+module_resolution:
+  separator: "/"
+  candidate_path_templates:
+    - "{module}.fmb"
+    - "{module}.fmx"
+
+package_aggregator:
+  files: []
+
+visibility:
+  rule: oracle_forms_app_is_public
+
+test_paths:
+  glob_patterns: []
+
+notes: |
+  Binary form modules are not parsed. The grammar emits one SYMBOL
+  (`sym_kind='form_app'`) per file so the FormsServiceResolver can
+  materialize a Service node. Use `ORACLE_FORMS_APPS=foo,bar` to add
+  Forms apps that aren't checked in as `.fmb` files.

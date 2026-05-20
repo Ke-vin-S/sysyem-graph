@@ -77,6 +77,27 @@ class GitHubSettings(BaseSettings):
         return True
 
 
+class OracleStackSettings(BaseSettings):
+    """Knobs for the Oracle-stack ingestion (PL/SQL, Pro*C, C, sh, Forms)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="ORACLE_", env_file=".env", extra="ignore"
+    )
+
+    forms_apps: tuple[str, ...] = ()
+    """Names of Oracle Forms apps that don't appear as `.fmb`/`.fmx` files
+    in the source tree (e.g. legacy forms checked into a binary registry).
+    Each name surfaces as an additional `Service(language='oracle_forms')`
+    in the graph. Set via `ORACLE_FORMS_APPS=acme_orders,acme_billing`."""
+
+    @field_validator("forms_apps", mode="before")
+    @classmethod
+    def _split_csv(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
+
+
 class TestParserSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TESTPARSER_", env_file=".env", extra="ignore")
 
@@ -113,6 +134,10 @@ class Settings(BaseSettings):
     @property
     def testparser(self) -> TestParserSettings:
         return TestParserSettings()
+
+    @property
+    def oracle_stack(self) -> OracleStackSettings:
+        return OracleStackSettings()
 
 
 @lru_cache(maxsize=1)

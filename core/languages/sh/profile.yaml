@@ -1,0 +1,30 @@
+name: sh
+file_extensions: [".sh", ".bash", ".ksh", ".zsh"]
+
+grammar:
+  kind: native
+  driver: core.languages.sh.grammar.ShGrammar
+
+module_resolution:
+  separator: "/"
+  candidate_path_templates:
+    - "{module}"
+    - "{module}.sh"
+
+package_aggregator:
+  files: []
+
+visibility:
+  rule: shell_function_global_scope
+
+test_paths:
+  function_name_prefixes: ["test_"]
+  glob_patterns:
+    - "**/tests/**/*.sh"
+    - "**/test_*.sh"
+
+notes: |
+  Captures shell function definitions, command invocations, and `sqlplus
+  ... @script.sql` calls. Discrimination ("is this `cp` or `./my_binary`?")
+  is the resolver's job; the grammar records everything that looks like a
+  call.

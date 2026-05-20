@@ -13,7 +13,9 @@ from core.types.errors import ConfigurationError
 
 def test_load_library_picks_up_shipped_yamls() -> None:
     library = load_library(DEFAULT_LANGUAGES_DIR)
-    assert set(library.names()) == {"python", "java", "plsql"}
+    assert set(library.names()) == {
+        "python", "java", "plsql", "c", "proc_c", "sh", "oracle_forms",
+    }
 
 
 def test_python_profile_shape() -> None:
@@ -39,11 +41,11 @@ def test_java_profile_shape() -> None:
     assert java.visibility.rule == "java_public_modifier"
 
 
-def test_plsql_profile_uses_llm_grammar() -> None:
+def test_plsql_profile_uses_native_grammar() -> None:
     library = load_library(DEFAULT_LANGUAGES_DIR)
     plsql = library.get("plsql")
-    assert plsql.grammar.kind is GrammarKind.LLM
-    assert plsql.grammar.driver == ""  # no native driver
+    assert plsql.grammar.kind is GrammarKind.NATIVE
+    assert "PlSqlGrammar" in plsql.grammar.driver
     assert set(plsql.file_extensions) >= {".sql", ".pks", ".pkb"}
 
 

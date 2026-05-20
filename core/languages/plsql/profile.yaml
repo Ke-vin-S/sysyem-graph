@@ -1,14 +1,13 @@
 name: plsql
-file_extensions: [".sql", ".pks", ".pkb"]
+file_extensions: [".sql", ".pks", ".pkb", ".plsql", ".prc", ".fnc", ".trg", ".vw"]
 
 grammar:
-  # No native Python AST library for PL/SQL exists in the stdlib or in the
-  # dependency set. Files route through LLMGrammar; with the default
-  # NullClient this returns zero facts (clean no-op), but the pipeline
-  # doesn't crash on `.sql` files. Wire a real LLM provider later to
-  # actually extract procedures/packages/triggers.
-  kind: llm
-  prompt_version: extract-facts-plsql-v1
+  # Regex-based extractor — no PL/SQL AST library in the dep set is worth
+  # pulling in for v1. Extracts packages, procedures, functions, triggers,
+  # cross-procedure calls, and embedded SQL (SELECT/INSERT/UPDATE/DELETE/
+  # MERGE/CALL). Identifiers are normalized to lowercase.
+  kind: native
+  driver: core.languages.plsql.grammar.PlSqlGrammar
 
 module_resolution:
   separator: "."
@@ -32,7 +31,7 @@ test_paths:
     - "**/*_test.sql"
 
 notes: |
-  Hypothetical-language demonstrator. Proves the architecture admits
-  languages without a native AST: drop this YAML, files route through
-  LLMGrammar, no resolver edits required. With NullClient, .sql files
-  produce 0 facts but never break the run.
+  Native regex grammar. Case-insensitive (all emitted names are
+  lowercased). Cross-package calls and embedded SQL are extracted at
+  fact-emission time; semantic resolution (which procedure does a
+  qualified callee resolve to?) is done by OracleCallResolver.
