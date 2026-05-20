@@ -10,8 +10,10 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from typing import Annotated
+
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Neo4jSettings(BaseSettings):
@@ -49,10 +51,13 @@ class GitHubSettings(BaseSettings):
 
     token: SecretStr | None = None
     api_url: str = "https://api.github.com"
-    repos: tuple[str, ...] = ()
+    repos: Annotated[tuple[str, ...], NoDecode] = ()
     """Comma-separated repo URLs (`https://github.com/owner/name`) or
     short-form `owner/name`. Both are accepted; short-form is normalized to
-    a URL by the service layer."""
+    a URL by the service layer.
+
+    `NoDecode` annotation suppresses pydantic-settings' default JSON-decode
+    pass on tuple fields so our CSV `_split_csv` validator runs first."""
 
     clones_dir: Path = Path("./out/github_repos")
     """Where shallow clones live. One subdirectory per `owner/name`."""
@@ -84,7 +89,7 @@ class OracleStackSettings(BaseSettings):
         env_prefix="ORACLE_", env_file=".env", extra="ignore"
     )
 
-    forms_apps: tuple[str, ...] = ()
+    forms_apps: Annotated[tuple[str, ...], NoDecode] = ()
     """Names of Oracle Forms apps that don't appear as `.fmb`/`.fmx` files
     in the source tree (e.g. legacy forms checked into a binary registry).
     Each name surfaces as an additional `Service(language='oracle_forms')`

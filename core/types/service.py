@@ -180,6 +180,17 @@ class CodeArtifact(_Provenance):
     FunctionCallResolver. Materialized as (CodeArtifact)-[:CALLS]->(CodeArtifact)
     edges in Neo4j."""
 
+    reads: tuple[str, ...] = Field(default_factory=tuple)
+    """IDs of `CodeArtifact(type='table'/'view')` records this artifact
+    reads from. Populated by `DbAccessResolver` for procedures / functions
+    containing `SELECT`. Materialized as (CodeArtifact)-[:READS]->
+    (CodeArtifact) edges."""
+
+    writes: tuple[str, ...] = Field(default_factory=tuple)
+    """IDs of `CodeArtifact(type='table'/'view')` records this artifact
+    writes to (INSERT/UPDATE/DELETE/MERGE/TRUNCATE). Materialized as
+    (CodeArtifact)-[:WRITES]->(CodeArtifact) edges."""
+
 
 class TestCase(_Provenance):
     """A single test case identified in a repo.

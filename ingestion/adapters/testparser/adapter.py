@@ -43,7 +43,10 @@ from core.resolvers import (
     TestResolver,
 )
 from core.config import OracleStackSettings
+from core.resolvers.db_access_resolver import resolve_db_access
 from core.resolvers.forms_service_resolver import extract_forms_services
+from core.resolvers.oracle_call_resolver import resolve_oracle_calls
+from core.resolvers.shell_invoke_resolver import resolve_shell_invokes
 from core.types import CodeArtifact, Endpoint, LineRange, Service, TestCase
 from core.types.errors import IngestionError
 from core.walker import Walker
@@ -202,6 +205,38 @@ class TestParserAdapter(IngestionAdapter):
             logger.info(
                 "testparser[%s]: function_call_resolver -> %d CALLS edges",
                 repo_id, len(call_resolution.edges),
+            )
+
+        # 2c. Oracle-stack resolvers: cross-package PL/SQL calls, Pro*C →
+        # PL/SQL via EXEC SQL, DB table reads/writes, shell → binaries.
+        # They thread through the same artifact list and add new ones
+        # (`table:…`, `script:…`, and stub `proc:…external…`).
+        with _timed("oracle_call_resolver", repo_id):
+            ocr = resolve_oracle_calls(
+                trees={repo_id: tree}, artifacts=function_artifacts
+            )
+            function_artifacts = ocr.artifacts
+            logger.info(
+                "testparser[%s]: oracle_call_resolver -> %d edges",
+                repo_id, len(ocr.edges),
+            )
+        with _timed("db_access_resolver", repo_id):
+            db = resolve_db_access(
+                trees={repo_id: tree}, artifacts=function_artifacts
+            )
+            function_artifacts = db.artifacts
+            logger.info(
+                "testparser[%s]: db_access_resolver -> %d tables",
+                repo_id, len(db.table_artifacts),
+            )
+        with _timed("shell_invoke_resolver", repo_id):
+            sh = resolve_shell_invokes(
+                trees={repo_id: tree}, artifacts=function_artifacts
+            )
+            function_artifacts = sh.artifacts
+            logger.info(
+                "testparser[%s]: shell_invoke_resolver -> %d edges",
+                repo_id, len(sh.edges),
             )
         result.artifacts.extend(function_artifacts)
 
@@ -386,6 +421,10 @@ class TestParserAdapter(IngestionAdapter):
             return artifact
         # Rebuild ID with the rel path so it matches what callers will look up.
         prefix = artifact.id.split(":", 2)[0]  # 'fn', 'class', 'method', 'endpoint'
+        if prefix == "proc":
+            # PL/SQL procedure ids are keyed by `proc:repo:pkg:name`, not by
+            # file path — only the file field needs rewriting.
+            return artifact.model_copy(update={"file": rel})
         new_id = f"{prefix}:{artifact.repo_id}:{rel}:{artifact.name}"
         if prefix == "method":
             # Method IDs are `method:repo:file:Class.name` — preserve the qualifier.

@@ -663,6 +663,10 @@ def _build_relationships(
             edges.append({"src": artifact.id, "rel": "EXPOSES", "dst": conn_id})
         for callee_id in artifact.calls:
             edges.append({"src": artifact.id, "rel": "CALLS", "dst": callee_id})
+        for tbl_id in artifact.reads:
+            edges.append({"src": artifact.id, "rel": "READS", "dst": tbl_id})
+        for tbl_id in artifact.writes:
+            edges.append({"src": artifact.id, "rel": "WRITES", "dst": tbl_id})
 
     for test in tests:
         if test.repo_id in service_ids:

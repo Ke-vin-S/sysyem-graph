@@ -68,13 +68,32 @@ class FunctionResolver:
         if not name:
             return None
         enclosing = str(fact.data.get("enclosing_class", ""))
-        if sym_kind == "function":
+        enclosing_pkg = str(fact.data.get("enclosing_package", ""))
+        # PL/SQL procedures / functions / triggers get a stable
+        # `proc:<repo>:<pkg>:<name>` id so cross-package callers can
+        # resolve them by qualified name, independent of file location.
+        if sym_kind in {"procedure", "trigger"}:
+            type_label = sym_kind
+            artifact_id = (
+                f"proc:{ctx.repo_id}:{enclosing_pkg}:{name}"
+                if enclosing_pkg
+                else f"proc:{ctx.repo_id}::{name}"
+            )
+        elif sym_kind == "function" and enclosing_pkg:
+            # PL/SQL function inside a package — same `proc:…` id family.
+            type_label = "function"
+            artifact_id = f"proc:{ctx.repo_id}:{enclosing_pkg}:{name}"
+        elif sym_kind == "function":
             type_label = "function"
             artifact_id = f"fn:{ctx.repo_id}:{fact.file}:{name}"
         elif sym_kind == "method":
             type_label = "method"
             artifact_id = f"method:{ctx.repo_id}:{fact.file}:{enclosing}.{name}"
         elif sym_kind == "field":
+            return None
+        elif sym_kind == "form_app":
+            # Forms apps are surfaced as Service nodes (by
+            # `FormsServiceResolver`), not CodeArtifacts.
             return None
         else:
             return None

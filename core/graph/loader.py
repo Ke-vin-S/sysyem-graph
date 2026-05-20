@@ -222,6 +222,30 @@ class GraphLoader:
                     for callee_id in a.calls
                 ],
             )
+            # (CodeArtifact)-[:READS|WRITES]->(CodeArtifact) — populated by
+            # DbAccessResolver for procedures touching tables/views.
+            stats.edges["READS"] = self._merge_edges(
+                session,
+                src_label="CodeArtifact",
+                rel="READS",
+                dst_label="CodeArtifact",
+                rows=[
+                    {"src": a.id, "dst": tbl_id}
+                    for a in artifacts
+                    for tbl_id in a.reads
+                ],
+            )
+            stats.edges["WRITES"] = self._merge_edges(
+                session,
+                src_label="CodeArtifact",
+                rel="WRITES",
+                dst_label="CodeArtifact",
+                rows=[
+                    {"src": a.id, "dst": tbl_id}
+                    for a in artifacts
+                    for tbl_id in a.writes
+                ],
+            )
 
             # ---- Phase-2 edges ----------------------------------------
             # (Service)-[:CONTAINS]->(Endpoint|DataModel|Query|Mock|KafkaP/C)
