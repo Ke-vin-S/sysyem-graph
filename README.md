@@ -14,7 +14,7 @@ Phase 1 — **data ingestion** — is in progress:
 - `core/adapters/` — Adapter framework (base class, registry, merger, mapper, validator, confidence scorer).
 - `core/config/` — Env-driven settings.
 - `ingestion/adapters/datadog/` — Extracts inter-service calls from Datadog APM spans.
-- `ingestion/adapters/github/` — Pulls repo metadata and source files from GitHub.
+- `ingestion/adapters/github/` — Shallow-clones GitHub repos into a local cache (`./out/github_repos/`), tracks last-ingested SHA in `./out/github.db`, skips re-ingest when the remote HEAD hasn't moved.
 - `ingestion/adapters/testparser/` — Walks local repo checkouts, classifies tests UNIT/COMPONENT/INTEGRATION.
 
 Later phases (Neo4j loader, impact rules, test selector, API, webhook, dashboard) are not implemented yet.
@@ -136,28 +136,62 @@ Examples below use `.venv/bin/<tool>`; translate as needed.
 
 ### 1. Ingest one or more repos
 
-`testparser` auto-detects whether `TESTPARSER_ROOT` is a **single repo**
-or a **parent of repos**:
+The recommended workflow is **clone from GitHub** — register a URL once,
+ingest as many times as you like. Clones live in `./out/github_repos/`
+and re-ingest is keyed on the commit SHA, so unchanged repos are
+skipped automatically.
+
+```bash
+# Register a public repo (no token needed).
+.venv/bin/sg-ingest github add fastapi/fastapi
+.venv/bin/sg-ingest github add https://github.com/encode/httpx
+
+# List + status.
+.venv/bin/sg-ingest github list
+.venv/bin/sg-ingest github status
+
+# Clone-if-needed and ingest into ./out/.
+.venv/bin/sg-ingest github ingest --all
+
+# Re-running with no upstream changes is a no-op (SHA unchanged → skip).
+.venv/bin/sg-ingest github ingest --all
+
+# Remove a repo (default: also deletes the clone).
+.venv/bin/sg-ingest github remove encode/httpx
+# Or just wipe the clone, keep the DB row (next ingest re-clones).
+.venv/bin/sg-ingest github clean fastapi/fastapi
+.venv/bin/sg-ingest github clean --all
+```
+
+Private repos: set `GITHUB_TOKEN` in `.env`; the token is injected into
+the clone URL during `git fetch` and scrubbed from `.git/config`
+afterwards, so it's never persisted on disk. Other knobs:
+
+```ini
+GITHUB_TOKEN=ghp_...                       # optional; required for private repos
+GITHUB_CLONES_DIR=./out/github_repos       # where shallow clones live
+GITHUB_STORE_PATH=./out/github.db          # SQLite metadata (SHA cache)
+GITHUB_DEFAULT_BRANCH=                     # leave empty = follow origin/HEAD
+GITHUB_REPOS=owner/a,owner/b               # optional seed list; auto-registers on first run
+```
+
+#### Local-folder workflow (for fixtures + offline)
+
+You can still point `testparser` at a local directory — useful for the
+bundled `./data/` fixture and for repos you've cloned yourself:
 
 * If the path contains repo markers (`.git`, `pyproject.toml`,
   `setup.py`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
   `build.gradle`) at the top level, **that path IS the service**. Its
   `repo_id` is the folder's own name.
 * Otherwise its immediate subdirectories are scanned as separate repos
-  (the original mode — useful for monorepo-style layouts and the
-  bundled `./data/` fixture).
+  (useful for monorepo-style layouts and the bundled `./data/` fixture).
 
 Override the auto-detect with `TESTPARSER_SINGLE_REPO=true|false` if
-the heuristic guesses wrong (e.g. a monorepo whose root carries a
-top-level `pyproject.toml`).
+the heuristic guesses wrong.
 
 **Linux / macOS:**
 ```bash
-TESTPARSER_ROOT=<parent-dir-of-repos> \
-  .venv/bin/sg-ingest --out ./out \
-                      --skip datadog --skip github   # omit to enable them
-
-# Example: the demo fixture (one repo: sample-payment-service)
 TESTPARSER_ROOT=./data .venv/bin/sg-ingest --out ./out --skip datadog --skip github
 ```
 
@@ -172,16 +206,6 @@ $env:TESTPARSER_ROOT = "<parent-dir-of-repos>"
 set TESTPARSER_ROOT=<parent-dir-of-repos>
 .venv\Scripts\sg-ingest --out .\out --skip datadog --skip github
 ```
-
-Point directly at a single repo:
-
-```bash
-TESTPARSER_ROOT=<absolute-repo-path> .venv/bin/sg-ingest --out ./out \
-    --skip datadog --skip github
-```
-
-(Old workflow needed a wrapper directory + symlink to make a single repo
-look like a parent-of-repos; that's no longer required.)
 
 Output lands in `./out/{services,artifacts,endpoints,data_models,queries,
 kafka_topics,kafka_producers,kafka_consumers,mocks,tests,connections,

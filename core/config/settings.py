@@ -50,7 +50,19 @@ class GitHubSettings(BaseSettings):
     token: SecretStr | None = None
     api_url: str = "https://api.github.com"
     repos: tuple[str, ...] = ()
-    """Comma-separated 'owner/repo' values are split into a tuple."""
+    """Comma-separated repo URLs (`https://github.com/owner/name`) or
+    short-form `owner/name`. Both are accepted; short-form is normalized to
+    a URL by the service layer."""
+
+    clones_dir: Path = Path("./out/github_repos")
+    """Where shallow clones live. One subdirectory per `owner/name`."""
+
+    store_path: str = "./out/github.db"
+    """SQLite metadata DB tracking last-ingested SHA per repo."""
+
+    default_branch: str = ""
+    """If set, clone this branch instead of the remote's default HEAD.
+    Empty = follow origin/HEAD."""
 
     @field_validator("repos", mode="before")
     @classmethod
@@ -61,7 +73,8 @@ class GitHubSettings(BaseSettings):
 
     @property
     def enabled(self) -> bool:
-        return self.token is not None
+        # Public repos are clonable without a token, so we no longer gate on it.
+        return True
 
 
 class TestParserSettings(BaseSettings):

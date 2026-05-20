@@ -3,29 +3,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from core.config import GitHubSettings
 
 
 @dataclass
 class GitHubAdapterConfig:
-    token: str
-    api_url: str = "https://api.github.com"
+    """Bound to the clone-based GitHub ingestor.
+
+    `token` is optional — public repos clone without auth. When set we
+    rewrite the clone URL to `https://x-access-token:<token>@github.com/…`
+    in `RepoCloner` (and scrub it back after the operation so the token
+    never lands in the on-disk `.git/config`)."""
+
+    clones_dir: Path
+    store_path: str
+    token: str = ""
+    default_branch: str = ""
     repos: tuple[str, ...] = ()
-    """List of 'owner/repo' to ingest. Empty = error (no scope)."""
-
-    max_file_bytes: int = 256 * 1024
-    """Skip files larger than this. Most source files are well under 256 KiB."""
-
-    file_extensions: tuple[str, ...] = (".py", ".go", ".java", ".ts", ".tsx", ".js")
+    """Optional seed list (from `GITHUB_REPOS`). Repos added via
+    `sg-ingest github add` are tracked in the store, NOT here — `repos`
+    is only used as a one-time bootstrap for the legacy env-driven
+    workflow."""
 
     @classmethod
-    def from_settings(cls, settings: GitHubSettings) -> "GitHubAdapterConfig":
-        if not settings.enabled:
-            raise ValueError("GITHUB_TOKEN is not configured")
-        assert settings.token is not None
+    def from_settings(cls, settings: GitHubSettings) -> GitHubAdapterConfig:
+        token = settings.token.get_secret_value() if settings.token is not None else ""
         return cls(
-            token=settings.token.get_secret_value(),
-            api_url=settings.api_url,
+            clones_dir=settings.clones_dir,
+            store_path=settings.store_path,
+            token=token,
+            default_branch=settings.default_branch,
             repos=settings.repos,
         )

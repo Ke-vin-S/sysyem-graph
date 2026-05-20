@@ -29,7 +29,13 @@ from ingestion.adapters.datadog import (
 from ingestion.adapters.datadog.fetcher import DatadogFetcher
 from ingestion.adapters.datadog.parser import DatadogParser
 from ingestion.adapters.datadog.trace_parser import TraceParser
-from ingestion.adapters.github import GitHubAdapter, GitHubAdapterConfig
+from ingestion.adapters.github import (
+    GitHubAdapter,
+    GitHubAdapterConfig,
+    GitHubService,
+    GitHubStore,
+    RepoCloner,
+)
 from ingestion.adapters.testparser import TestParserAdapter, TestParserAdapterConfig
 
 # `invoke_without_command=True` lets `sg-ingest --out ./out --skip datadog`
@@ -383,6 +389,153 @@ def _replace_cfg(cfg: DatadogAdapterConfig, **kwargs: Any) -> DatadogAdapterConf
     )
 
 
+# ---- github sub-app --------------------------------------------------------
+
+github_app = typer.Typer(
+    help="Manage and ingest GitHub repositories (clone-based, incremental).",
+    no_args_is_help=True,
+)
+app.add_typer(github_app, name="github")
+
+
+def _build_github_service() -> tuple[GitHubService, GitHubAdapterConfig]:
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+    cfg = GitHubAdapterConfig.from_settings(settings.github)
+    store = GitHubStore(cfg.store_path)
+    cloner = RepoCloner(clones_dir=cfg.clones_dir, token=cfg.token)
+    return GitHubService(store=store, cloner=cloner), cfg
+
+
+@github_app.command("add")
+def github_add(
+    url: str = typer.Argument(..., help="Repo URL or owner/name."),
+    branch: str = typer.Option(
+        "", "--branch", help="Track this branch instead of remote HEAD."
+    ),
+) -> None:
+    """Register a repository for future ingestion. No clone happens yet."""
+    service, _ = _build_github_service()
+    record = service.add_repo(url, branch=branch)
+    typer.echo(f"added {record.url}")
+    typer.echo(f"  owner/name: {record.owner}/{record.name}")
+    typer.echo(f"  clone_path: {record.clone_path}")
+
+
+@github_app.command("list")
+def github_list() -> None:
+    """Show every registered repository."""
+    service, _ = _build_github_service()
+    records = service.list_repos()
+    if not records:
+        typer.echo("no repos registered.")
+        return
+    typer.echo(f"{'URL':60s} {'SHA':10s} {'STATUS':12s} INGESTED")
+    for r in records:
+        sha = (r.last_commit_sha or "—")[:8]
+        ingested = r.last_ingested_at or "—"
+        typer.echo(f"{r.url:60s} {sha:10s} {r.status:12s} {ingested}")
+
+
+@github_app.command("remove")
+def github_remove(
+    url: str = typer.Argument(..., help="Repo URL or owner/name to remove."),
+    keep_clone: bool = typer.Option(
+        False, "--keep-clone", help="Leave the on-disk clone in place."
+    ),
+) -> None:
+    """Unregister a repo and (by default) delete its clone."""
+    service, _ = _build_github_service()
+    if service.remove_repo(url, delete_clone=not keep_clone):
+        typer.echo(f"removed {url}")
+    else:
+        typer.secho(f"not found: {url}", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+
+@github_app.command("clean")
+def github_clean(
+    url: str = typer.Argument("", help="Specific repo to clean. Omit with --all."),
+    all_repos: bool = typer.Option(False, "--all", help="Wipe every clone."),
+) -> None:
+    """Wipe on-disk clone(s) but keep DB rows. Next ingest re-clones."""
+    if not url and not all_repos:
+        typer.secho("specify a URL or pass --all", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    service, _ = _build_github_service()
+    removed = service.clean_clones(url=None if all_repos else url)
+    typer.echo(f"cleaned {removed} clone(s)")
+
+
+@github_app.command("status")
+def github_status() -> None:
+    """Disk + ingest state for every registered repo."""
+    service, cfg = _build_github_service()
+    statuses = service.get_status()
+    if not statuses:
+        typer.echo("no repos registered.")
+        return
+    typer.echo(f"clones_dir: {cfg.clones_dir}")
+    typer.echo("")
+    typer.echo(f"{'URL':50s} {'STATUS':10s} {'CLONE':6s} {'SIZE':>10s}  NEEDS_INGEST")
+    for s in statuses:
+        size = _human_size(s.clone_size_bytes)
+        clone = "yes" if s.clone_exists else "no"
+        flag = "yes" if s.needs_ingest else "no"
+        typer.echo(f"{s.record.url:50s} {s.record.status:10s} {clone:6s} {size:>10s}  {flag}")
+
+
+@github_app.command("ingest")
+def github_ingest(
+    url: str = typer.Argument("", help="Specific repo to ingest. Omit with --all."),
+    all_repos: bool = typer.Option(False, "--all", help="Ingest every registered repo."),
+    out: Path = typer.Option(
+        Path("./out"), help="Directory to write the merged records as JSON."
+    ),
+) -> None:
+    """Clone-if-needed and ingest into the merged records.
+
+    Runs ONLY the GitHub adapter (other adapters are skipped). Use plain
+    `sg-ingest` or `sg-ingest run` for the full pipeline."""
+    if not url and not all_repos:
+        typer.secho("specify a URL or pass --all", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level)
+    cfg = GitHubAdapterConfig.from_settings(settings.github)
+
+    registry = AdapterRegistry()
+    adapter = GitHubAdapter(cfg)
+    registry.register(adapter)
+
+    repos = None if all_repos else (url,)
+    report = registry.run_all(IngestionContext(repos=repos))
+    typer.echo(f"counts: {report.merged.counts()}")
+    if report.failures:
+        typer.secho(f"failures: {report.failures}", fg=typer.colors.RED)
+
+    out.mkdir(parents=True, exist_ok=True)
+    merged = report.merged
+    services = list(merged.services.values())
+    artifacts = list(merged.artifacts.values())
+    _dump(out / "services.json", [s.model_dump(mode="json") for s in services])
+    _dump(out / "artifacts.json", [a.model_dump(mode="json") for a in artifacts])
+    typer.echo(f"wrote {len(services)} services and {len(artifacts)} artifacts to {out}")
+
+    if report.failures:
+        raise typer.Exit(code=1)
+
+
+def _human_size(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}"
+        size /= 1024
+    return f"{size:.0f} TiB"
+
+
 def _register_adapters(
     registry: AdapterRegistry, settings: Any, skipped: set[str]
 ) -> None:
@@ -390,9 +543,18 @@ def _register_adapters(
         cfg = DatadogAdapterConfig.from_settings(settings.datadog)
         store = DatadogStore(cfg.store_path)
         registry.register(DatadogAdapter(cfg, store=store))
-    if "github" not in skipped and settings.github.enabled and settings.github.repos:
+    if "github" not in skipped:
         cfg = GitHubAdapterConfig.from_settings(settings.github)
-        registry.register(GitHubAdapter(cfg))
+        # Register the adapter when EITHER there are seed repos (legacy
+        # env-driven flow) OR the store already knows about some repos
+        # (added via `sg-ingest github add`).
+        store = GitHubStore(cfg.store_path)
+        try:
+            has_repos = bool(cfg.repos) or bool(store.list_repos())
+        finally:
+            store.close()
+        if has_repos:
+            registry.register(GitHubAdapter(cfg))
     if "testparser" not in skipped:
         cfg = TestParserAdapterConfig.from_settings(settings.testparser)
         if cfg.root.exists():
