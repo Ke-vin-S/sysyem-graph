@@ -30,11 +30,15 @@ from ingestion.adapters.datadog.fetcher import DatadogFetcher
 from ingestion.adapters.datadog.parser import DatadogParser
 from ingestion.adapters.datadog.trace_parser import TraceParser
 from ingestion.adapters.github import (
+    AuthError,
+    AuthVerifier,
     GitHubAdapter,
     GitHubAdapterConfig,
     GitHubService,
     GitHubStore,
     RepoCloner,
+    TokenResolver,
+    host_of,
 )
 from ingestion.adapters.testparser import TestParserAdapter, TestParserAdapterConfig
 
@@ -403,7 +407,7 @@ def _build_github_service() -> tuple[GitHubService, GitHubAdapterConfig]:
     logging.basicConfig(level=settings.log_level)
     cfg = GitHubAdapterConfig.from_settings(settings.github)
     store = GitHubStore(cfg.store_path)
-    cloner = RepoCloner(clones_dir=cfg.clones_dir, token=cfg.token)
+    cloner = RepoCloner(clones_dir=cfg.clones_dir)
     return GitHubService(store=store, cloner=cloner), cfg
 
 
@@ -483,6 +487,76 @@ def github_status() -> None:
         clone = "yes" if s.clone_exists else "no"
         flag = "yes" if s.needs_ingest else "no"
         typer.echo(f"{s.record.url:50s} {s.record.status:10s} {clone:6s} {size:>10s}  {flag}")
+
+
+# ---- `sg-ingest github auth …` ---------------------------------------------
+
+auth_app = typer.Typer(
+    help="Manage and validate GitHub PATs (per host).",
+    no_args_is_help=True,
+)
+github_app.add_typer(auth_app, name="auth")
+
+
+@auth_app.command("check")
+def github_auth_check(
+    url: str = typer.Argument(
+        "",
+        help="Clone URL to derive the host from. Mutually exclusive with --host.",
+    ),
+    host: str = typer.Option(
+        "",
+        "--host",
+        help="GitHub host to validate against (e.g. github.com, ghe.acme.com).",
+    ),
+) -> None:
+    """Hit `<host>/user` to confirm the resolved PAT works.
+
+    Prints the authenticated login and the token's OAuth scopes. Use this
+    BEFORE registering private repos to catch token issues early."""
+    if url and host:
+        typer.secho("pass either URL or --host, not both", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    target_host = host or (host_of(url) if url else "github.com")
+    if not target_host:
+        typer.secho(f"could not derive host from {url!r}", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+
+    resolver = TokenResolver()
+    token = resolver.resolve(f"https://{target_host}/_/_")
+    verifier = AuthVerifier()
+    try:
+        outcome = verifier.check(target_host, token)
+    except AuthError as exc:
+        typer.secho(f"error: {exc.hint}", fg=typer.colors.RED)
+        raise typer.Exit(code=2) from None
+
+    scopes = ", ".join(outcome.scopes) if outcome.scopes else "(no scopes header)"
+    typer.echo(f"logged in as {outcome.login} on {outcome.host}")
+    typer.echo(f"  api:    {outcome.api_url}")
+    typer.echo(f"  scopes: {scopes}")
+
+
+@auth_app.command("show")
+def github_auth_show() -> None:
+    """List token-configuration status for every known host.
+
+    Known hosts = github.com plus any host appearing in registered repos."""
+    service, _ = _build_github_service()
+    hosts: set[str] = {"github.com"}
+    for record in service.list_repos():
+        h = host_of(record.url)
+        if h:
+            hosts.add(h)
+
+    resolver = TokenResolver()
+    typer.echo(f"{'HOST':30s} {'CONFIGURED':12s} ENV VAR")
+    for h in sorted(hosts):
+        configured = resolver.is_configured(h)
+        env_var = resolver.env_var_for(h)
+        flag = "yes" if configured else "no"
+        suffix = "" if configured else f"  (set {env_var})"
+        typer.echo(f"{h:30s} {flag:12s} {env_var}{suffix}")
 
 
 @github_app.command("ingest")

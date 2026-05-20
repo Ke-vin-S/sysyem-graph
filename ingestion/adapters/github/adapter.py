@@ -20,6 +20,7 @@ import logging
 
 from core.adapters.base import AdapterResult, Coverage, IngestionAdapter, IngestionContext
 from core.types.errors import IngestionError
+from ingestion.adapters.github.auth import AuthError
 from ingestion.adapters.github.cloner import RepoCloner
 from ingestion.adapters.github.config import GitHubAdapterConfig
 from ingestion.adapters.github.repo_fetcher import RepoFetcher
@@ -51,7 +52,7 @@ class GitHubAdapter(IngestionAdapter):
         self._config = config
         if service is None:
             store = GitHubStore(config.store_path)
-            cloner = RepoCloner(clones_dir=config.clones_dir, token=config.token)
+            cloner = RepoCloner(clones_dir=config.clones_dir)
             service = GitHubService(store=store, cloner=cloner)
         self._service = service
         self._fetcher = fetcher or RepoFetcher()
@@ -84,6 +85,12 @@ class GitHubAdapter(IngestionAdapter):
         for url in urls:
             try:
                 fresh = self._service.ensure_fresh(url, now=context.now)
+            except AuthError as exc:
+                # Auth-flavored failures are user-actionable. Surface the
+                # doctor message verbatim and keep ingesting the rest.
+                logger.warning("github: %s — %s", url, exc.hint)
+                result.warnings.append(f"{url}: {exc.hint}")
+                continue
             except IngestionError as exc:
                 result.warnings.append(f"{url}: {exc}")
                 continue

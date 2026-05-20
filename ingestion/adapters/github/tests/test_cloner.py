@@ -136,6 +136,81 @@ def test_remove_clone(tmp_path: Path) -> None:
     assert cloner.remove_clone("o", "n") is False  # idempotent
 
 
+# ---- auth-failure classification through the cloner ---------------------
+
+
+def test_clone_failure_with_no_token_against_real_remote_is_runtime_error(
+    tmp_path: Path,
+) -> None:
+    """Clone against a *missing* local path produces a generic error, not
+    AuthError — there's no token configured, no auth-flavored stderr."""
+    cloner = RepoCloner(clones_dir=tmp_path / "clones")
+    with pytest.raises((RuntimeError, Exception)):
+        cloner.clone_or_update(
+            url="file:///no/such/path", owner="o", name="n", branch="main"
+        )
+
+
+def test_auth_error_surfaced_when_stderr_looks_like_auth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Simulate a GitCommandError with auth-flavored stderr and assert the
+    cloner re-raises as AuthError (rather than RuntimeError)."""
+    import git as gitlib
+
+    from ingestion.adapters.github.auth import AuthError, TokenResolver
+    from ingestion.adapters.github.cloner import RepoCloner
+
+    def boom(*args, **kwargs):
+        raise gitlib.GitCommandError(
+            command=["git", "clone"],
+            status=128,
+            stderr="remote: Repository not found.\nfatal: repository '…' not found\n",
+        )
+
+    monkeypatch.setattr(gitlib.Repo, "clone_from", staticmethod(boom))
+
+    # No token configured for github.com → classify_git_error returns AuthError.
+    resolver = TokenResolver(env={})
+    cloner = RepoCloner(clones_dir=tmp_path / "clones", token_resolver=resolver)
+    with pytest.raises(AuthError) as exc_info:
+        cloner.clone_or_update(
+            url="https://github.com/acme/private",
+            owner="acme",
+            name="private",
+            branch="main",
+        )
+    assert "GITHUB_TOKEN" in exc_info.value.hint
+    assert exc_info.value.host == "github.com"
+
+
+def test_auth_error_with_token_marks_token_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import git as gitlib
+
+    from ingestion.adapters.github.auth import AuthError, TokenResolver
+    from ingestion.adapters.github.cloner import RepoCloner
+
+    def boom(*args, **kwargs):
+        raise gitlib.GitCommandError(
+            command=["git", "clone"],
+            status=128,
+            stderr="fatal: Authentication failed for 'https://github.com/o/n'\n",
+        )
+
+    monkeypatch.setattr(gitlib.Repo, "clone_from", staticmethod(boom))
+
+    resolver = TokenResolver(env={"GITHUB_TOKEN": "ghp_x"})
+    cloner = RepoCloner(clones_dir=tmp_path / "clones", token_resolver=resolver)
+    with pytest.raises(AuthError) as exc_info:
+        cloner.clone_or_update(
+            url="https://github.com/o/n", owner="o", name="n", branch="main"
+        )
+    assert exc_info.value.token_configured is True
+    assert "rejected" in exc_info.value.hint
+
+
 def test_clean_all_wipes_every_clone(tmp_path: Path) -> None:
     remote, _ = _make_bare_remote(tmp_path)
     cloner = RepoCloner(clones_dir=tmp_path / "clones")

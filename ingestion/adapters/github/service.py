@@ -29,6 +29,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from core.types.errors import IngestionError
+from ingestion.adapters.github.auth import AuthError
 from ingestion.adapters.github.cloner import CloneResult, RepoCloner
 from ingestion.adapters.github.store import GitHubStore, RepoRecord
 
@@ -145,6 +146,11 @@ class GitHubService:
                 branch=record.default_branch,
                 previous_sha=record.last_commit_sha,
             )
+        except AuthError as exc:
+            # Record the doctor message in the DB and re-raise unchanged so the
+            # adapter/CLI can render a friendly hint instead of a stack trace.
+            self._store.mark_error(canonical, error=str(exc))
+            raise
         except Exception as exc:
             self._store.mark_error(canonical, error=str(exc))
             raise IngestionError("github", f"clone/update failed for {canonical}: {exc}") from exc

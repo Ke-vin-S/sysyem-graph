@@ -165,10 +165,50 @@ skipped automatically.
 
 Private repos: set `GITHUB_TOKEN` in `.env`; the token is injected into
 the clone URL during `git fetch` and scrubbed from `.git/config`
-afterwards, so it's never persisted on disk. Other knobs:
+afterwards, so it's never persisted on disk. Validate the token works
+*before* you queue private repos:
+
+```bash
+.venv/bin/sg-ingest github auth check
+#   logged in as kevin-s on github.com
+#     api:    https://api.github.com
+#     scopes: repo, read:org
+```
+
+If the clone fails with `repository not found`, the CLI prints a doctor
+message naming the exact env var to set (e.g. `set GITHUB_TOKEN and
+retry`) — you don't have to guess whether the URL is wrong or the token
+is missing.
+
+#### Multi-host (GitHub Enterprise + github.com)
+
+One PAT per host. The lookup convention is `GITHUB_TOKEN_<HOST>` where
+`<HOST>` uppercases the hostname and replaces `.`/`-` with `_`:
+
+```bash
+# .env
+GITHUB_TOKEN=ghp_for_github_com
+GITHUB_TOKEN_GHE_ACME_COM=ghp_for_acme_ghe   # → host ghe.acme.com
+GITHUB_TOKEN_GIT_INTERNAL=ghp_for_internal   # → host git.internal
+```
+
+Confirm each one independently:
+
+```bash
+.venv/bin/sg-ingest github auth check                          # github.com (default)
+.venv/bin/sg-ingest github auth check --host ghe.acme.com      # GHE
+.venv/bin/sg-ingest github auth show                           # table of all known hosts
+```
+
+`auth show` lists every host you have registered repos for plus
+github.com, and tells you which env var to set for any that are
+unconfigured.
+
+Other knobs:
 
 ```ini
-GITHUB_TOKEN=ghp_...                       # optional; required for private repos
+GITHUB_TOKEN=ghp_...                       # optional; required for private repos on github.com
+GITHUB_TOKEN_<HOST>=ghp_...                # per-host PATs for GHE / other hosts
 GITHUB_CLONES_DIR=./out/github_repos       # where shallow clones live
 GITHUB_STORE_PATH=./out/github.db          # SQLite metadata (SHA cache)
 GITHUB_DEFAULT_BRANCH=                     # leave empty = follow origin/HEAD

@@ -171,6 +171,37 @@ def test_ensure_fresh_full_lifecycle(tmp_path: Path, service: GitHubService) -> 
     assert not Path(rec.clone_path).exists()
 
 
+def test_auth_error_propagates_and_marks_status_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, service: GitHubService
+) -> None:
+    """When the cloner raises AuthError, the service should mark the repo
+    as `status='error'` (with the doctor message in `last_error`) and
+    re-raise the AuthError so the CLI can render it."""
+    import git as gitlib
+
+    from ingestion.adapters.github.auth import AuthError
+
+    service.add_repo("https://github.com/acme/private", owner="acme", name="private")
+
+    def boom(*args, **kwargs):
+        raise gitlib.GitCommandError(
+            command=["git", "clone"],
+            status=128,
+            stderr="remote: Repository not found.\nfatal: repository '…' not found\n",
+        )
+
+    monkeypatch.setattr(gitlib.Repo, "clone_from", staticmethod(boom))
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    with pytest.raises(AuthError):
+        service.ensure_fresh("https://github.com/acme/private")
+
+    record = service.get_repo("https://github.com/acme/private")
+    assert record is not None
+    assert record.status == "error"
+    assert "GITHUB_TOKEN" in record.last_error
+
+
 def test_get_status_reports_disk_and_ingest_state(
     tmp_path: Path, service: GitHubService
 ) -> None:

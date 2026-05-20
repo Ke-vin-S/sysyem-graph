@@ -267,6 +267,24 @@ Key properties:
 * **Two-phase commit.** `record_clone` runs as soon as we know the SHA; `record_ingest` only runs after records have been built. A crash between the two leaves the next run with `last_ingested_sha != last_commit_sha` and it retries.
 * **Token hygiene.** When `GITHUB_TOKEN` is set, it's injected at fetch time (`https://x-access-token:<token>@github.com/…`) and scrubbed from `.git/config` immediately after. It never persists on disk.
 
+**Per-host PATs.** A `TokenResolver` sits in front of the cloner and picks the right token from the environment for each clone URL. github.com falls back to `GITHUB_TOKEN`; other hosts (e.g. GitHub Enterprise) use `GITHUB_TOKEN_<HOST>` (uppercased, `.`/`-` → `_`). When git fails with auth-flavored stderr (`Authentication failed`, `Invalid username or token`, or `Repository not found` while no token was sent) the cloner re-raises as `AuthError` so the CLI can print a doctor message instead of the raw git error.
+
+```mermaid
+flowchart LR
+    URL[clone URL<br/>https://&lt;host&gt;/…]
+    Env[(env vars<br/>GITHUB_TOKEN<br/>GITHUB_TOKEN_&lt;HOST&gt;)]
+    URL --> Resolver[TokenResolver.resolve]
+    Env --> Resolver
+    Resolver --> Inject[x-access-token:&lt;token&gt;<br/>injected into URL]
+    Inject --> Clone[git clone/fetch]
+    Clone -- success --> Scrub[scrub origin URL]
+    Clone -- auth-flavored stderr --> Classify[classify_git_error]
+    Classify --> AuthErr[AuthError host, hint]
+    AuthErr --> CLI[CLI prints doctor message:<br/>which env var to set]
+```
+
+`sg-ingest github auth check [--host …]` validates a configured token by hitting `<api>/user` via `httpx` (the existing runtime dep, no new packages). Use it before queueing private repos so token issues surface immediately, not on the first clone.
+
 **TestParserAdapter** — walks a local filesystem path containing one or more checked-out repos as subdirectories. No staging store; the source-of-truth is your working tree.
 
 ```

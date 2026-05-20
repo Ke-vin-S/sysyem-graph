@@ -10,10 +10,17 @@ Wraps `git.Repo` to give us a single high-level operation:
   origin/HEAD`; returns `changed=True` iff the HEAD SHA moved.
 * If the on-disk clone is missing or unreadable, we re-clone from scratch.
 
-Auth (private repos): when the optional `token` is provided, the URL is
-rewritten to `https://x-access-token:<token>@github.com/...` for the
-duration of the clone. The token is NEVER persisted to the on-disk remote
-URL — we rewrite `origin` back to the public form after the operation.
+Auth (private repos): the cloner delegates to a `TokenResolver`. When a
+PAT is configured for the URL's host the clone URL is rewritten to
+`https://x-access-token:<token>@<host>/...` for the duration of the git
+operation. The token is NEVER persisted to the on-disk remote URL — we
+rewrite `origin` back to the public form after every operation.
+
+When git fails with an auth-flavored error (`Authentication failed`,
+`Invalid username or token`, or `Repository not found` while no token
+was sent), we re-raise as `AuthError` so the CLI can print a doctor
+message naming the exact env var to set. Other git failures bubble up
+as `RuntimeError` unchanged.
 """
 
 from __future__ import annotations
@@ -24,6 +31,12 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
+
+from ingestion.adapters.github.auth import (
+    TokenResolver,
+    classify_git_error,
+    host_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +54,10 @@ class RepoCloner:
         self,
         *,
         clones_dir: Path,
-        token: str = "",
+        token_resolver: TokenResolver | None = None,
     ) -> None:
         self._clones_dir = Path(clones_dir)
-        self._token = token
+        self._resolver = token_resolver or TokenResolver()
 
     @property
     def clones_dir(self) -> Path:
@@ -75,7 +88,9 @@ class RepoCloner:
         dest = self.target_path(owner, name)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        fetch_url = self._auth_url(url)
+        host = host_of(url)
+        token = self._resolver.resolve(url)
+        fetch_url = self._auth_url(url, token=token)
         public_url = self._strip_auth(url)
 
         if not _looks_like_git_repo(dest):
@@ -86,7 +101,11 @@ class RepoCloner:
             clone_kwargs: dict[str, object] = {"depth": 1}
             if branch:
                 clone_kwargs["branch"] = branch
-            repo = Repo.clone_from(fetch_url, dest, **clone_kwargs)
+            try:
+                repo = Repo.clone_from(fetch_url, dest, **clone_kwargs)
+            except GitCommandError as exc:
+                _cleanup_partial_clone(dest)
+                self._raise_auth_or_runtime(exc, host=host, token_configured=bool(token), url=public_url)
             self._scrub_origin(repo, public_url)
             sha = repo.head.commit.hexsha
             return CloneResult(path=dest, sha=sha, changed=True, was_fresh_clone=True)
@@ -106,7 +125,7 @@ class RepoCloner:
                 new_sha = repo.commit(target_ref).hexsha
         except GitCommandError as exc:
             self._scrub_origin(repo, public_url)
-            raise RuntimeError(f"git fetch failed for {public_url}: {exc}") from exc
+            self._raise_auth_or_runtime(exc, host=host, token_configured=bool(token), url=public_url)
 
         if previous_sha and new_sha == previous_sha:
             self._scrub_origin(repo, public_url)
@@ -145,13 +164,13 @@ class RepoCloner:
 
     # ---- url helpers ---------------------------------------------------
 
-    def _auth_url(self, url: str) -> str:
-        if not self._token:
+    def _auth_url(self, url: str, *, token: str) -> str:
+        if not token:
             return url
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             return url
-        netloc = f"x-access-token:{self._token}@{parsed.hostname}"
+        netloc = f"x-access-token:{token}@{parsed.hostname}"
         if parsed.port:
             netloc += f":{parsed.port}"
         return urlunparse(parsed._replace(netloc=netloc))
@@ -173,6 +192,30 @@ class RepoCloner:
         with contextlib.suppress(Exception):
             repo.remotes.origin.set_url(public_url)
 
+    def _raise_auth_or_runtime(
+        self,
+        exc: Exception,
+        *,
+        host: str,
+        token_configured: bool,
+        url: str,
+    ) -> None:
+        """Convert auth-flavored git failures into AuthError; otherwise
+        bubble up RuntimeError with the original git message."""
+        stderr = getattr(exc, "stderr", "") or str(exc)
+        auth = classify_git_error(stderr, host=host, token_configured=token_configured)
+        if auth is not None:
+            raise auth from exc
+        raise RuntimeError(f"git failed for {url}: {exc}") from exc
+
 
 def _looks_like_git_repo(path: Path) -> bool:
     return (path / ".git").exists()
+
+
+def _cleanup_partial_clone(dest: Path) -> None:
+    """`Repo.clone_from` can leave a half-written destination on failure.
+    Wipe it so the next attempt re-clones from scratch."""
+    if dest.exists():
+        with contextlib.suppress(OSError):
+            shutil.rmtree(dest)
