@@ -122,3 +122,43 @@ def test_disk_backed_store_persists_across_open(tmp_path: Path) -> None:
     assert rec is not None
     assert rec.last_commit_sha == "zzz"
     reopened.close()
+
+
+def test_empty_db_file_self_heals_on_open(tmp_path: Path) -> None:
+    """Regression: a stale `out/github.db` left behind by an aborted
+    init (file exists, no tables inside) used to make subsequent
+    `sg-ingest github add` calls fail with `no such table: repos`. The
+    store should detect that and re-apply the baseline migration."""
+    import sqlite3
+
+    db = tmp_path / "github.db"
+    # Create an empty file with a valid SQLite header — no tables.
+    sqlite3.connect(db).close()
+
+    # Opening through GitHubStore must produce a usable schema.
+    store = GitHubStore(db)
+    store.upsert_repo(url="u", owner="o", name="n", clone_path="/p")
+    assert store.get_repo("u") is not None
+    store.close()
+
+
+def test_db_with_orphan_migrations_table_self_heals(tmp_path: Path) -> None:
+    """Another corruption shape: `_migrations` exists and claims version 1
+    was applied, but the data tables aren't there. The runner should
+    detect the schema gap and re-apply the baseline."""
+    import sqlite3
+
+    db = tmp_path / "github.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    conn.executescript(
+        "CREATE TABLE _migrations(version INTEGER PRIMARY KEY, "
+        "name TEXT NOT NULL, applied_at TEXT NOT NULL);"
+        "INSERT INTO _migrations VALUES(1, 'init', '2026-01-01');"
+    )
+    conn.close()
+
+    store = GitHubStore(db)
+    # repos table is now present and usable.
+    store.upsert_repo(url="u", owner="o", name="n", clone_path="/p")
+    assert store.get_repo("u") is not None
+    store.close()

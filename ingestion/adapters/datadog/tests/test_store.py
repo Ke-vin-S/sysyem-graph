@@ -299,3 +299,25 @@ def test_read_spans_ordered_by_start() -> None:
         )
         ids = [s.span_id for s in store.read_spans()]
         assert ids == ["early", "late"]
+
+
+def test_empty_db_file_self_heals_on_open(tmp_path) -> None:
+    """Regression: a stale `out/datadog.db` left behind by an aborted
+    init (file exists, no tables) used to crash later runs with
+    `no such table: fetch_log`. The runner should detect the gap and
+    re-apply the baseline migration."""
+    import sqlite3
+
+    db = tmp_path / "datadog.db"
+    sqlite3.connect(db).close()
+
+    # No exception expected, and the store should be usable.
+    store = DatadogStore(db)
+    try:
+        # `record_fetch` writes into the fetch_log table — proves the
+        # baseline migration was re-applied.
+        store.record_fetch(api="spans", rows_written=0)
+        history = store.fetch_history(api="spans")
+    finally:
+        store.close()
+    assert len(history) == 1

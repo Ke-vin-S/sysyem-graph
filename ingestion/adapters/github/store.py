@@ -67,6 +67,13 @@ class GitHubStore:
     Pass `":memory:"` (the default) for tests.
     """
 
+    # Tables every fully-initialised GitHubStore must have. Checked at the
+    # end of `_run_migrations` so a half-initialised on-disk file (e.g.
+    # one created by an earlier process before the migrations dir was
+    # present on the import path) self-heals on the next open instead of
+    # producing cryptic "no such table: repos" errors.
+    _REQUIRED_TABLES: tuple[str, ...] = ("repos",)
+
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._path = str(path)
         if self._path != ":memory:":
@@ -98,6 +105,17 @@ class GitHubStore:
     def _run_migrations(self) -> None:
         migrations = _discover_migrations()
         if not migrations:
+            # Packaging bug or wrong cwd: migrations dir is empty but the
+            # store is being asked to provision a schema. Surface it loud
+            # instead of silently leaving a half-built DB on disk.
+            if not self._has_required_schema():
+                raise RuntimeError(
+                    "GitHubStore: no migration files discovered AND required "
+                    f"tables {self._REQUIRED_TABLES} are missing from "
+                    f"{self._path!r}. The package may be installed without "
+                    "its migration data; reinstall with `pip install -e .` "
+                    "from the repo root."
+                )
             return
         if not self._migrations_table_exists():
             self._apply_migration(migrations[0])
@@ -107,12 +125,44 @@ class GitHubStore:
             if migration.version in applied:
                 continue
             self._apply_migration(migration)
+        # Self-heal: if everything the tracker says is applied but the
+        # schema is still missing required tables (e.g. an aborted prior
+        # init left an empty file behind, or the tracker is somehow
+        # populated against a DB that has no other tables), re-run the
+        # baseline. Every CREATE in migrations[0] uses `IF NOT EXISTS`,
+        # so this is safe.
+        if not self._has_required_schema():
+            logger.warning(
+                "GitHubStore: %r missing required tables after migration "
+                "run — re-applying baseline migration 0001",
+                self._path,
+            )
+            self._apply_migration(_discover_migrations()[0])
+            if not self._has_required_schema():
+                raise RuntimeError(
+                    f"GitHubStore: required tables {self._REQUIRED_TABLES} "
+                    "still missing after re-applying baseline migration. "
+                    f"Inspect {self._path!r} manually or delete it to "
+                    "force a clean rebuild."
+                )
 
     def _migrations_table_exists(self) -> bool:
         row = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'"
         ).fetchone()
         return row is not None
+
+    def _has_required_schema(self) -> bool:
+        """True iff every table in `_REQUIRED_TABLES` exists in the DB."""
+        if not self._REQUIRED_TABLES:
+            return True
+        placeholders = ",".join("?" * len(self._REQUIRED_TABLES))
+        row = self._conn.execute(
+            f"SELECT count(name) FROM sqlite_master "
+            f"WHERE type='table' AND name IN ({placeholders})",
+            self._REQUIRED_TABLES,
+        ).fetchone()
+        return int(row[0]) == len(self._REQUIRED_TABLES)
 
     def _applied_versions(self) -> set[int]:
         rows = self._conn.execute("SELECT version FROM _migrations").fetchall()

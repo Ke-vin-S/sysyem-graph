@@ -68,6 +68,12 @@ class DatadogStore:
     and not safe to share across processes; create one per pipeline run.
     """
 
+    # Tables every fully-initialised DatadogStore must have. Checked at the
+    # end of `_run_migrations` to self-heal half-initialised on-disk files
+    # (an earlier process exited mid-init, or was started with the
+    # migrations dir missing from the import path).
+    _REQUIRED_TABLES: tuple[str, ...] = ("fetch_log", "spans", "services_catalog")
+
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._path = str(path)
         if self._path != ":memory:":
@@ -107,6 +113,16 @@ class DatadogStore:
         """
         migrations = _discover_migrations()
         if not migrations:
+            # Packaging bug or wrong cwd: nothing to apply but the schema
+            # isn't here either. Surface it instead of silently leaving a
+            # half-built file behind.
+            if not self._has_required_schema():
+                raise RuntimeError(
+                    "DatadogStore: no migration files discovered AND required "
+                    f"tables {self._REQUIRED_TABLES} are missing from "
+                    f"{self._path!r}. Reinstall the package with "
+                    "`pip install -e .` from the repo root."
+                )
             return
 
         # First migration creates `_migrations` itself; bootstrap the table
@@ -121,11 +137,43 @@ class DatadogStore:
                 continue
             self._apply_migration(migration)
 
+        # Self-heal: same idea as GitHubStore. If we somehow reached this
+        # point with the tracker satisfied but the schema still incomplete
+        # (an aborted earlier init, or the tracker rows surviving without
+        # the data tables), re-run the baseline. Idempotent thanks to
+        # `IF NOT EXISTS` in every CREATE.
+        if not self._has_required_schema():
+            logger.warning(
+                "DatadogStore: %r missing required tables after migration "
+                "run — re-applying baseline migration 0001",
+                self._path,
+            )
+            self._apply_migration(_discover_migrations()[0])
+            if not self._has_required_schema():
+                raise RuntimeError(
+                    f"DatadogStore: required tables {self._REQUIRED_TABLES} "
+                    "still missing after re-applying baseline migration. "
+                    f"Inspect {self._path!r} manually or delete it to force "
+                    "a clean rebuild."
+                )
+
     def _migrations_table_exists(self) -> bool:
         row = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'"
         ).fetchone()
         return row is not None
+
+    def _has_required_schema(self) -> bool:
+        """True iff every table in `_REQUIRED_TABLES` exists in the DB."""
+        if not self._REQUIRED_TABLES:
+            return True
+        placeholders = ",".join("?" * len(self._REQUIRED_TABLES))
+        row = self._conn.execute(
+            f"SELECT count(name) FROM sqlite_master "
+            f"WHERE type='table' AND name IN ({placeholders})",
+            self._REQUIRED_TABLES,
+        ).fetchone()
+        return int(row[0]) == len(self._REQUIRED_TABLES)
 
     def _applied_versions(self) -> set[int]:
         rows = self._conn.execute("SELECT version FROM _migrations").fetchall()
