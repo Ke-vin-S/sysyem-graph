@@ -340,6 +340,44 @@ $env:TESTPARSER_ROOT = "$pwd"
 .venv\Scripts\sg-graph.exe load --from .\out
 ```
 
+## Product UI (Explorer + Pipelines)
+
+The repo ships a React + FastAPI product layer for visually exploring the
+impact graph and generating Markdown reports. The CLI remains the source
+of truth for ingestion — the UI is read-only and renders state straight
+out of Neo4j and the adapter SQLite stores.
+
+```bash
+# One-time: install npm deps.
+make ui-install
+
+# Two terminals: API on :8000, UI on :5173.
+make api-dev   # uvicorn api.main:app --reload
+make ui-dev    # cd ui && npm run dev
+```
+
+Or containerized:
+
+```bash
+make product-up   # neo4j + api + ui via docker compose --profile product
+# open http://localhost:5173
+make product-down
+```
+
+**Pages:**
+
+* **Explorer (`/explore`)** — search for any node, see its 1-hop
+  neighborhood on the graph canvas, switch to "Impact" mode to walk
+  downstream/upstream dependencies up to N hops, scan the affected list
+  in the side panel, and click "Download report" to grab a Markdown
+  summary.
+* **Pipelines (`/pipelines`)** — one card per adapter (GitHub, Datadog,
+  TestParser) showing last-run state pulled from `out/github.db` and
+  `out/datadog.db`. To trigger a run, use `sg-ingest` in the terminal.
+
+The API itself is reachable for scripting at <http://localhost:8000/docs>
+(OpenAPI / Swagger UI).
+
 ## Basic queries
 
 Paste into the Neo4j browser at <http://localhost:7474>. Replace

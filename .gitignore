@@ -40,3 +40,7 @@ artifacts/
 .system-graph/
 /data/backend/
 /data/fastapi-best-architecture/
+
+ui/node_modules/
+ui/dist/
+ui/.vite/

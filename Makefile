@@ -9,7 +9,8 @@ RUFF    = $(VENV)/bin/ruff
 COMPOSE ?= docker compose
 
 .PHONY: help install dev neo4j-up neo4j-down test lint format typecheck clean \
-        docker-build docker-test docker-shell docker-ingest docker-down
+        docker-build docker-test docker-shell docker-ingest docker-down \
+        api-dev ui-install ui-dev ui-build product-up product-down
 
 help:
 	@echo "Targets (host venv):"
@@ -29,6 +30,14 @@ help:
 	@echo "  docker-shell   - drop into a bash shell in the dev container"
 	@echo "  docker-ingest  - run sg-ingest inside the container (uses ./data)"
 	@echo "  docker-down    - tear down all compose services"
+	@echo ""
+	@echo "Targets (product — explorer UI + API):"
+	@echo "  api-dev        - start FastAPI on :8000 (host venv)"
+	@echo "  ui-install     - npm install in ./ui"
+	@echo "  ui-dev         - start Vite dev server on :5173 (host node)"
+	@echo "  ui-build       - production build of the UI to ./ui/dist"
+	@echo "  product-up     - boot neo4j + api + ui via docker compose"
+	@echo "  product-down   - tear down product profile"
 
 $(VENV)/bin/activate:
 	$(PYTHON) -m venv $(VENV)
@@ -82,3 +91,23 @@ docker-ingest:
 
 docker-down:
 	$(COMPOSE) --profile dev down
+
+# ---- product stack -------------------------------------------------------
+
+api-dev:
+	$(VENV)/bin/uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+
+ui-install:
+	cd ui && npm install --no-audit --no-fund
+
+ui-dev:
+	cd ui && npm run dev
+
+ui-build:
+	cd ui && npm run build
+
+product-up:
+	$(COMPOSE) --profile product up -d
+
+product-down:
+	$(COMPOSE) --profile product down

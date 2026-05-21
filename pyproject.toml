@@ -32,6 +32,8 @@ dependencies = [
     "structlog>=24.1,<26",
     "tree-sitter>=0.25,<1",
     "tree-sitter-python>=0.25,<1",
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
 ]
 
 [project.optional-dependencies]
@@ -48,11 +50,12 @@ dev = [
 [project.scripts]
 sg-ingest = "ingestion.cli:app"
 sg-graph = "core.graph.cli:app"
+sg-api = "api.main:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "ingestion*"]
-exclude = ["tests*", "docs*", ".venv*"]
+include = ["core*", "ingestion*", "api*"]
+exclude = ["tests*", "docs*", ".venv*", "ui*"]
 
 [tool.setuptools.package-data]
 "ingestion.adapters.datadog.migrations" = ["*.sql"]
@@ -60,7 +63,7 @@ exclude = ["tests*", "docs*", ".venv*"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
-testpaths = ["core", "ingestion", "tests"]
+testpaths = ["core", "ingestion", "api", "tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*Suite", "*Tests"]
 markers = [
@@ -78,6 +81,11 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's idiomatic `Depends(...)` argument default is the entire
+# point of the framework's DI system — flagging it as B008 is noise.
+"api/**" = ["B008"]
 
 [tool.mypy]
 python_version = "3.10"

@@ -69,8 +69,56 @@ services:
     tty: true
     stdin_open: true
 
+  # Product API. Tucked behind the `product` profile so it doesn't boot
+  # for plain `docker compose up neo4j`. The image is the existing dev
+  # image so we don't pay a second build.
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: system-graph-dev:latest
+    profiles: ["product"]
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:Z
+      - pip-cache:/root/.cache/pip
+    ports:
+      - "8000:8000"
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-password}
+      NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+      DD_API_KEY: ${DD_API_KEY:-}
+      DD_APP_KEY: ${DD_APP_KEY:-}
+      DD_SITE: ${DD_SITE:-datadoghq.com}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      TESTPARSER_ROOT: ${TESTPARSER_ROOT:-/workspace/data}
+    depends_on:
+      neo4j:
+        condition: service_started
+
+  # React dev server. Reverse-proxies /api → the api service. Vite's
+  # HMR works through the bind-mount without any extra config.
+  ui:
+    image: docker.io/library/node:22-alpine
+    profiles: ["product"]
+    working_dir: /workspace/ui
+    command: ["sh", "-c", "npm install --no-audit --no-fund && npm run dev -- --host"]
+    volumes:
+      - .:/workspace:Z
+      - ui-node-modules:/workspace/ui/node_modules
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE: http://api:8000
+    depends_on:
+      - api
+
 volumes:
   neo4j-data:
   neo4j-logs:
   neo4j-plugins:
   pip-cache:
+  ui-node-modules:
