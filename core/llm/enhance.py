@@ -65,7 +65,7 @@ class LLMEnhancer:
     override (e.g. when the AnthropicClient negotiates a different model)."""
 
     @classmethod
-    def null(cls) -> "LLMEnhancer":
+    def null(cls) -> LLMEnhancer:
         """Default no-op enhancer: NullClient + NullCache, returns 0 suggestions.
         Useful as the default in adapters/CLIs so the pipeline never breaks
         when no provider is configured."""

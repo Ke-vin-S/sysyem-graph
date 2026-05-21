@@ -16,6 +16,7 @@ from core.llm.client import (
     SubgraphResolution,
 )
 from core.llm.enhance import EnhanceStats, LLMEnhancer
+from core.llm.factory import make_llm_client
 from core.llm.null_client import NullClient
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "RepoOverlay",
     "SubgraphQuestion",
     "SubgraphResolution",
+    "make_llm_client",
 ]
